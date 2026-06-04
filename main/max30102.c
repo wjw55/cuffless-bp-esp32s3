@@ -23,6 +23,9 @@
 
 #define MAX30102_MODE_RESET 0x40
 #define MAX30102_MODE_SPO2 0x03
+#define MAX30102_FIFO_AVERAGE_1 0x00
+#define MAX30102_SPO2_CONFIG_100HZ_18BIT 0x27
+#define MAX30102_LED_CURRENT_7_2MA 0x24
 
 static const char *TAG = "max30102";
 
@@ -88,10 +91,13 @@ esp_err_t max30102_init(void)
     ESP_RETURN_ON_ERROR(max30102_write_register(MAX30102_REG_OVF_COUNTER, 0x00), TAG, "Clear FIFO overflow counter failed");
     ESP_RETURN_ON_ERROR(max30102_write_register(MAX30102_REG_FIFO_RD_PTR, 0x00), TAG, "Clear FIFO read pointer failed");
 
-    ESP_RETURN_ON_ERROR(max30102_write_register(MAX30102_REG_FIFO_CONFIG, 0x40), TAG, "FIFO config failed");
-    ESP_RETURN_ON_ERROR(max30102_write_register(MAX30102_REG_SPO2_CONFIG, 0x27), TAG, "SpO2 config failed");
-    ESP_RETURN_ON_ERROR(max30102_write_register(MAX30102_REG_LED1_PA, 0x24), TAG, "RED LED config failed");
-    ESP_RETURN_ON_ERROR(max30102_write_register(MAX30102_REG_LED2_PA, 0x24), TAG, "IR LED config failed");
+    // FIFO reads: disable sample averaging so each FIFO entry is a raw red/IR sample pair.
+    ESP_RETURN_ON_ERROR(max30102_write_register(MAX30102_REG_FIFO_CONFIG, MAX30102_FIFO_AVERAGE_1), TAG, "FIFO config failed");
+    // Sampling rate: 100 samples/sec, 18-bit ADC pulse width, 4096 nA ADC range.
+    ESP_RETURN_ON_ERROR(max30102_write_register(MAX30102_REG_SPO2_CONFIG, MAX30102_SPO2_CONFIG_100HZ_18BIT), TAG, "SpO2 config failed");
+    // LED current: 0x24 is about 7.2 mA for both LEDs; adjust only if signal is weak or saturated.
+    ESP_RETURN_ON_ERROR(max30102_write_register(MAX30102_REG_LED1_PA, MAX30102_LED_CURRENT_7_2MA), TAG, "RED LED config failed");
+    ESP_RETURN_ON_ERROR(max30102_write_register(MAX30102_REG_LED2_PA, MAX30102_LED_CURRENT_7_2MA), TAG, "IR LED config failed");
     ESP_RETURN_ON_ERROR(max30102_write_register(MAX30102_REG_MODE_CONFIG, MAX30102_MODE_SPO2), TAG, "SpO2 mode failed");
 
     uint8_t interrupt_status = 0;
@@ -137,8 +143,8 @@ esp_err_t max30102_read_fifo_sample(uint32_t *red, uint32_t *ir)
         return result;
     }
 
-    *red = (((uint32_t)data[0] << 16) | ((uint32_t)data[1] << 8) | data[2]) & 0x3FFFF;
-    *ir = (((uint32_t)data[3] << 16) | ((uint32_t)data[4] << 8) | data[5]) & 0x3FFFF;
+    *red = (((uint32_t)data[0] << 16) | ((uint32_t)data[1] << 8) | data[2]) & MAX30102_ADC_MAX_VALUE;
+    *ir = (((uint32_t)data[3] << 16) | ((uint32_t)data[4] << 8) | data[5]) & MAX30102_ADC_MAX_VALUE;
 
     return ESP_OK;
 }

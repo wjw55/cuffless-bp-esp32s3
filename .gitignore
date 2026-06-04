@@ -16,6 +16,9 @@
 # Log files
 *.log
 
+# Local measurement data
+data/raw/
+
 # Build artifacts and directories
 **/build/
 build/
