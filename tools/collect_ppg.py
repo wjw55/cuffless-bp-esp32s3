@@ -1,8 +1,8 @@
 """Collect raw MAX30102 PPG rows from an ESP32 serial port.
 
 Expected firmware output:
-    timestamp_ms,red,ir
-    12345,48231,53120
+    sample_seq,timestamp_ms,red,ir
+    42,12345,48231,53120
 
 This script saves one recording session as:
     data/raw/<subject>_<session>_ppg.csv
@@ -15,6 +15,7 @@ from __future__ import annotations
 import argparse
 import json
 import re
+import subprocess
 import sys
 import time
 from datetime import datetime
@@ -54,6 +55,18 @@ def nonnegative_float(value: str) -> float:
     return parsed
 
 
+def positive_int(value: str) -> int:
+    try:
+        parsed = int(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("must be an integer") from exc
+
+    if parsed <= 0:
+        raise argparse.ArgumentTypeError("must be greater than 0")
+
+    return parsed
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Collect raw PPG CSV rows from ESP32/MAX30102 serial output."
@@ -62,12 +75,40 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--duration", required=True, type=positive_float, help="Recording duration in seconds")
     parser.add_argument("--subject", required=True, help="Subject ID, for example S01")
     parser.add_argument("--session", required=True, help="Session name, for example test_001")
+    parser.add_argument("--trial-id", default="", help="Trial ID, for example T01")
+    parser.add_argument("--posture", default="", help="Subject posture, for example seated")
+    parser.add_argument("--sensor-location", default="", help="PPG sensor location, for example index_finger")
+    parser.add_argument("--cuff-arm", default="", help="Arm used for cuff BP reference, for example left")
+    parser.add_argument("--ppg-hand", default="", help="Hand used for PPG sensor, for example right")
     parser.add_argument("--baud", type=int, default=115200, help="Serial baud rate, default 115200")
     parser.add_argument("--notes", default="", help="Optional notes saved into metadata")
+    parser.add_argument("--systolic-mmhg", dest="systolic_mmHg", type=positive_int, help="Optional cuff systolic BP")
+    parser.add_argument("--diastolic-mmhg", dest="diastolic_mmHg", type=positive_int, help="Optional cuff diastolic BP")
+    parser.add_argument("--cuff-hr-bpm", type=positive_int, help="Optional cuff heart rate")
+    parser.add_argument("--cuff-timestamp", default="", help="Optional cuff reading timestamp, ideally ISO 8601")
     parser.add_argument("--outdir", default="data/raw", help="Output folder, default data/raw")
     parser.add_argument("--plot-start", type=nonnegative_float, help="Zoom plot start time in seconds")
     parser.add_argument("--plot-end", type=nonnegative_float, help="Zoom plot end time in seconds")
     return parser.parse_args()
+
+
+def get_firmware_git_commit() -> str | None:
+    """Return the current repo commit when this script is run from a Git checkout."""
+    project_root = Path(__file__).resolve().parents[1]
+
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "--short", "HEAD"],
+            cwd=project_root,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    except (OSError, subprocess.CalledProcessError):
+        return None
+
+    commit = result.stdout.strip()
+    return commit or None
 
 
 def import_dependencies():
@@ -112,31 +153,31 @@ def safe_name(value: str) -> str:
     return cleaned or "unknown"
 
 
-def parse_ppg_row(line: str) -> tuple[int, int, int] | None:
+def parse_ppg_row(line: str) -> tuple[int, int, int, int] | None:
     """Return a valid PPG row, or None for headers, boot logs, and debug lines."""
     text = line.strip()
     if not text:
         return None
 
-    if text.lower() == "timestamp_ms,red,ir":
+    if text.lower() in {"sample_seq,timestamp_ms,red,ir", "timestamp_ms,red,ir"}:
         return None
 
     if text.startswith("#"):
         return None
 
     parts = text.split(",")
-    if len(parts) != 3:
+    if len(parts) != 4:
         return None
 
     try:
-        timestamp_ms, red, ir = (int(part.strip()) for part in parts)
+        sample_seq, timestamp_ms, red, ir = (int(part.strip()) for part in parts)
     except ValueError:
         return None
 
-    if timestamp_ms < 0 or red < 0 or ir < 0:
+    if sample_seq < 0 or timestamp_ms < 0 or red < 0 or ir < 0:
         return None
 
-    return timestamp_ms, red, ir
+    return sample_seq, timestamp_ms, red, ir
 
 
 def summarize(df, requested_duration_s: float) -> dict:
@@ -145,6 +186,8 @@ def summarize(df, requested_duration_s: float) -> dict:
     median_dt_ms = None
     estimated_rate_hz = None
     red_min = red_max = ir_min = ir_max = None
+    sample_sequence_start = sample_sequence_end = None
+    missing_sample_sequences = 0
     warnings = []
 
     if sample_count == 0:
@@ -154,6 +197,17 @@ def summarize(df, requested_duration_s: float) -> dict:
         red_max = int(df["red"].max())
         ir_min = int(df["ir"].min())
         ir_max = int(df["ir"].max())
+        sample_sequence_start = int(df["sample_seq"].iloc[0])
+        sample_sequence_end = int(df["sample_seq"].iloc[-1])
+
+        sequence_delta = df["sample_seq"].diff().dropna()
+        if bool((sequence_delta <= 0).any()):
+            warnings.append("Sample sequence numbers are not strictly increasing.")
+
+        forward_gaps = sequence_delta[sequence_delta > 1]
+        if len(forward_gaps) > 0:
+            missing_sample_sequences = int((forward_gaps - 1).sum())
+            warnings.append(f"Sample sequence gaps detected: {missing_sample_sequences} missing sequence number(s).")
 
         if ir_max < LOW_IR_THRESHOLD:
             warnings.append("IR signal looks low: check finger contact and sensor alignment.")
@@ -188,6 +242,9 @@ def summarize(df, requested_duration_s: float) -> dict:
         "red_max": red_max,
         "ir_min": ir_min,
         "ir_max": ir_max,
+        "sample_sequence_start": sample_sequence_start,
+        "sample_sequence_end": sample_sequence_end,
+        "missing_sample_sequences": missing_sample_sequences,
         "warnings": warnings,
     }
 
@@ -307,6 +364,11 @@ def print_summary(
     print(f"  estimated sampling rate: {format_optional(summary['estimated_rate_hz'])} Hz")
     print(f"  red min/max: {format_optional(summary['red_min'], 0)} / {format_optional(summary['red_max'], 0)}")
     print(f"  ir min/max: {format_optional(summary['ir_min'], 0)} / {format_optional(summary['ir_max'], 0)}")
+    print(
+        "  sample seq: "
+        f"{format_optional(summary['sample_sequence_start'], 0)}-{format_optional(summary['sample_sequence_end'], 0)}"
+    )
+    print(f"  missing sample seq: {summary['missing_sample_sequences']}")
 
     if summary["warnings"]:
         print("  warnings:")
@@ -345,7 +407,7 @@ def main() -> int:
     plot_path = outdir / f"{prefix}_plot.png"
     zoom_plot_path = outdir / f"{prefix}_zoom_plot.png"
 
-    rows: list[tuple[int, int, int]] = []
+    rows: list[tuple[int, int, int, int]] = []
     ignored_lines = 0
     interrupted = False
 
@@ -386,7 +448,7 @@ def main() -> int:
         )
         return 1
 
-    df = pd.DataFrame(rows, columns=["timestamp_ms", "red", "ir"])
+    df = pd.DataFrame(rows, columns=["sample_seq", "timestamp_ms", "red", "ir"])
     df.to_csv(csv_path, index=False)
 
     summary = summarize(df, args.duration)
@@ -397,16 +459,29 @@ def main() -> int:
         return 1
 
     metadata = {
-        "subject": args.subject,
-        "session": args.session,
+        "subject_id": args.subject,
+        "session_id": args.session,
+        "trial_id": args.trial_id,
+        "posture": args.posture,
+        "sensor_location": args.sensor_location,
+        "cuff_arm": args.cuff_arm,
+        "ppg_hand": args.ppg_hand,
         "port": args.port,
         "baud_rate": args.baud,
         "duration_seconds": args.duration,
         "data_duration_seconds": summary["data_duration_s"],
         "recording_start_time": recording_start.isoformat(timespec="seconds"),
+        "firmware_git_commit": get_firmware_git_commit(),
         "sample_count": summary["sample_count"],
+        "sample_sequence_start": summary["sample_sequence_start"],
+        "sample_sequence_end": summary["sample_sequence_end"],
+        "missing_sample_sequences": summary["missing_sample_sequences"],
         "median_sample_interval_ms": summary["median_dt_ms"],
         "approximate_sampling_rate_hz": summary["estimated_rate_hz"],
+        "systolic_mmHg": args.systolic_mmHg,
+        "diastolic_mmHg": args.diastolic_mmHg,
+        "cuff_hr_bpm": args.cuff_hr_bpm,
+        "cuff_timestamp": args.cuff_timestamp or None,
         "notes": args.notes,
         "interrupted": interrupted,
         "ignored_non_csv_lines": ignored_lines,

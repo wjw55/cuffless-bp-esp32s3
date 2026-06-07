@@ -13,7 +13,9 @@
 
 bool max30102_is_connected(void);
 esp_err_t max30102_init(void);
-uint8_t max30102_available_samples(void);
+esp_err_t max30102_get_available_samples(uint8_t *samples);
+esp_err_t max30102_read_and_clear_overflow(uint8_t *overflow_count);
 esp_err_t max30102_read_fifo_sample(uint32_t *red, uint32_t *ir);
+uint32_t max30102_get_i2c_error_count(void);
 
 #endif

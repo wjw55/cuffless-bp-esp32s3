@@ -3,7 +3,6 @@
 
 #include "driver/i2c.h"
 #include "esp_err.h"
-#include "esp_log.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -16,12 +15,9 @@
 
 #define DEBUG_SIGNAL_QUALITY 0
 #define MAX30102_POLL_DELAY_MS 20
+#define ACQUISITION_STATS_PERIOD_MS 5000
 #define SIGNAL_QUALITY_STATUS_PERIOD_MS 1000
 #define SIGNAL_QUALITY_SATURATION_MARGIN 1000
-
-#if DEBUG_SIGNAL_QUALITY
-static const char *TAG = "app";
-#endif
 
 static esp_err_t i2c_master_init(void)
 {
@@ -50,7 +46,13 @@ void app_main(void)
 
     ESP_ERROR_CHECK(max30102_init());
 
-    printf("timestamp_ms,red,ir\n");
+    printf("sample_seq,timestamp_ms,red,ir\n");
+
+    uint64_t sample_seq = 0;
+    uint64_t last_stats_sample_seq = 0;
+    uint32_t overflow_count_total = 0;
+    uint8_t latest_fifo_available = 0;
+    int64_t last_stats_time_ms = esp_timer_get_time() / 1000;
 
 #if DEBUG_SIGNAL_QUALITY
     uint32_t ir_min = MAX30102_ADC_MAX_VALUE;
@@ -60,7 +62,17 @@ void app_main(void)
 #endif
 
     while (true) {
-        uint8_t samples = max30102_available_samples();
+        uint8_t samples = 0;
+        esp_err_t samples_result = max30102_get_available_samples(&samples);
+        if (samples_result == ESP_OK) {
+            latest_fifo_available = samples;
+        }
+
+        uint8_t overflow_count = 0;
+        if (max30102_read_and_clear_overflow(&overflow_count) == ESP_OK) {
+            overflow_count_total += overflow_count;
+        }
+
         int64_t latest_sample_time_ms = esp_timer_get_time() / 1000;
         int64_t first_sample_time_ms =
             latest_sample_time_ms - ((int64_t)(samples > 0 ? samples - 1 : 0) * MAX30102_SAMPLE_PERIOD_MS);
@@ -88,11 +100,11 @@ void app_main(void)
                 // Sampling rate: estimate per-sample timestamps at 100 Hz when draining FIFO batches.
                 int64_t timestamp_ms =
                     first_sample_time_ms + ((int64_t)sample_index * MAX30102_SAMPLE_PERIOD_MS);
-                printf("%" PRId64 ",%" PRIu32 ",%" PRIu32 "\n", timestamp_ms, red, ir);
+                printf("%" PRIu64 ",%" PRId64 ",%" PRIu32 ",%" PRIu32 "\n", sample_seq, timestamp_ms, red, ir);
+                sample_seq++;
             } else {
-#if DEBUG_SIGNAL_QUALITY
-                ESP_LOGW(TAG, "Failed to read MAX30102 FIFO sample");
-#endif
+                printf("# warning event=fifo_read_failed i2c_errors=%" PRIu32 "\n",
+                       max30102_get_i2c_error_count());
                 break;
             }
 
@@ -101,8 +113,8 @@ void app_main(void)
         }
 
 #if DEBUG_SIGNAL_QUALITY
-        int64_t now_ms = esp_timer_get_time() / 1000;
-        if (now_ms >= next_quality_status_ms) {
+        int64_t quality_now_ms = esp_timer_get_time() / 1000;
+        if (quality_now_ms >= next_quality_status_ms) {
             uint32_t ir_range = (quality_sample_count > 0) ? (ir_max - ir_min) : 0;
             const char *status = "usable";
 
@@ -117,14 +129,34 @@ void app_main(void)
             printf("# signal_quality,timestamp_ms=%" PRId64 ",ir_min=%" PRIu32
                    ",ir_max=%" PRIu32 ",ir_range=%" PRIu32 ",samples=%" PRIu32
                    ",status=%s\n",
-                   now_ms, ir_min, ir_max, ir_range, quality_sample_count, status);
+                   quality_now_ms, ir_min, ir_max, ir_range, quality_sample_count, status);
 
             ir_min = MAX30102_ADC_MAX_VALUE;
             ir_max = 0;
             quality_sample_count = 0;
-            next_quality_status_ms = now_ms + SIGNAL_QUALITY_STATUS_PERIOD_MS;
+            next_quality_status_ms = quality_now_ms + SIGNAL_QUALITY_STATUS_PERIOD_MS;
         }
 #endif
+
+        int64_t stats_now_ms = esp_timer_get_time() / 1000;
+        if (stats_now_ms - last_stats_time_ms >= ACQUISITION_STATS_PERIOD_MS) {
+            int64_t elapsed_ms = stats_now_ms - last_stats_time_ms;
+            uint64_t samples_since_last_status = sample_seq - last_stats_sample_seq;
+            uint64_t rate_tenths_hz =
+                (elapsed_ms > 0) ? ((samples_since_last_status * 10000ULL) / (uint64_t)elapsed_ms) : 0;
+
+            printf("# stats samples=%" PRIu64 " rate_hz=%" PRIu64 ".%" PRIu64
+                   " fifo_avail=%u ovf=%" PRIu32 " i2c_errors=%" PRIu32 "\n",
+                   sample_seq,
+                   rate_tenths_hz / 10,
+                   rate_tenths_hz % 10,
+                   (unsigned)latest_fifo_available,
+                   overflow_count_total,
+                   max30102_get_i2c_error_count());
+
+            last_stats_sample_seq = sample_seq;
+            last_stats_time_ms = stats_now_ms;
+        }
 
         // FIFO reads: poll faster than the 32-sample FIFO fills at 100 Hz to avoid dropped samples.
         vTaskDelay(pdMS_TO_TICKS(MAX30102_POLL_DELAY_MS));
