@@ -67,7 +67,7 @@ def positive_int(value: str) -> int:
     return parsed
 
 
-def parse_args() -> argparse.Namespace:
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Collect raw PPG CSV rows from ESP32/MAX30102 serial output."
     )
@@ -82,14 +82,54 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--ppg-hand", default="", help="Hand used for PPG sensor, for example right")
     parser.add_argument("--baud", type=int, default=115200, help="Serial baud rate, default 115200")
     parser.add_argument("--notes", default="", help="Optional notes saved into metadata")
-    parser.add_argument("--systolic-mmhg", dest="systolic_mmHg", type=positive_int, help="Optional cuff systolic BP")
-    parser.add_argument("--diastolic-mmhg", dest="diastolic_mmHg", type=positive_int, help="Optional cuff diastolic BP")
+    parser.add_argument(
+        "--systolic-mmhg",
+        "--systolic-mmHg",
+        dest="systolic_mmHg",
+        type=positive_int,
+        help="Optional cuff systolic BP",
+    )
+    parser.add_argument(
+        "--diastolic-mmhg",
+        "--diastolic-mmHg",
+        dest="diastolic_mmHg",
+        type=positive_int,
+        help="Optional cuff diastolic BP",
+    )
     parser.add_argument("--cuff-hr-bpm", type=positive_int, help="Optional cuff heart rate")
+    parser.add_argument(
+        "--cuff-start-time-s",
+        type=nonnegative_float,
+        help="Optional time in seconds when the cuff measurement was started relative to PPG recording start",
+    )
+    parser.add_argument(
+        "--cuff-reading-time-s",
+        type=nonnegative_float,
+        help="Optional time in seconds when the cuff reading appeared relative to PPG recording start",
+    )
     parser.add_argument("--cuff-timestamp", default="", help="Optional cuff reading timestamp, ideally ISO 8601")
     parser.add_argument("--outdir", default="data/raw", help="Output folder, default data/raw")
     parser.add_argument("--plot-start", type=nonnegative_float, help="Zoom plot start time in seconds")
     parser.add_argument("--plot-end", type=nonnegative_float, help="Zoom plot end time in seconds")
-    return parser.parse_args()
+    args = parser.parse_args(argv)
+    return validate_collection_args(args, parser)
+
+
+def validate_collection_args(args: argparse.Namespace, parser: argparse.ArgumentParser | None = None) -> argparse.Namespace:
+    cuff_time_fields = {
+        "cuff_start_time_s": "--cuff-start-time-s",
+        "cuff_reading_time_s": "--cuff-reading-time-s",
+    }
+
+    for field_name, option_name in cuff_time_fields.items():
+        value = getattr(args, field_name, None)
+        if value is not None and value > args.duration:
+            message = f"{option_name} must be between 0 and recording duration ({args.duration:g} s)"
+            if parser is not None:
+                parser.error(message)
+            raise SystemExit(f"ERROR: {message}")
+
+    return args
 
 
 def get_firmware_git_commit() -> str | None:
@@ -385,6 +425,50 @@ def print_summary(
     print(f"  zoom window: {zoom_start_s:.2f}-{zoom_end_s:.2f} s")
 
 
+def build_metadata(
+    args: argparse.Namespace,
+    summary: dict,
+    recording_start: datetime,
+    interrupted: bool,
+    ignored_lines: int,
+    zoom_start_s: float,
+    zoom_end_s: float,
+) -> dict:
+    return {
+        "subject_id": args.subject,
+        "session_id": args.session,
+        "trial_id": args.trial_id,
+        "posture": args.posture,
+        "sensor_location": args.sensor_location,
+        "cuff_arm": args.cuff_arm,
+        "ppg_hand": args.ppg_hand,
+        "port": args.port,
+        "baud_rate": args.baud,
+        "duration_seconds": args.duration,
+        "data_duration_seconds": summary["data_duration_s"],
+        "recording_start_time": recording_start.isoformat(timespec="seconds"),
+        "firmware_git_commit": get_firmware_git_commit(),
+        "sample_count": summary["sample_count"],
+        "sample_sequence_start": summary["sample_sequence_start"],
+        "sample_sequence_end": summary["sample_sequence_end"],
+        "missing_sample_sequences": summary["missing_sample_sequences"],
+        "median_sample_interval_ms": summary["median_dt_ms"],
+        "approximate_sampling_rate_hz": summary["estimated_rate_hz"],
+        "systolic_mmHg": args.systolic_mmHg,
+        "diastolic_mmHg": args.diastolic_mmHg,
+        "cuff_hr_bpm": args.cuff_hr_bpm,
+        "cuff_start_time_s": args.cuff_start_time_s,
+        "cuff_reading_time_s": args.cuff_reading_time_s,
+        "cuff_timestamp": args.cuff_timestamp or None,
+        "notes": args.notes,
+        "interrupted": interrupted,
+        "ignored_non_csv_lines": ignored_lines,
+        "zoom_plot_start_seconds": zoom_start_s,
+        "zoom_plot_end_seconds": zoom_end_s,
+        "warnings": summary["warnings"],
+    }
+
+
 def main() -> int:
     args = parse_args()
 
@@ -458,37 +542,15 @@ def main() -> int:
         print(f"ERROR: {exc}", file=sys.stderr)
         return 1
 
-    metadata = {
-        "subject_id": args.subject,
-        "session_id": args.session,
-        "trial_id": args.trial_id,
-        "posture": args.posture,
-        "sensor_location": args.sensor_location,
-        "cuff_arm": args.cuff_arm,
-        "ppg_hand": args.ppg_hand,
-        "port": args.port,
-        "baud_rate": args.baud,
-        "duration_seconds": args.duration,
-        "data_duration_seconds": summary["data_duration_s"],
-        "recording_start_time": recording_start.isoformat(timespec="seconds"),
-        "firmware_git_commit": get_firmware_git_commit(),
-        "sample_count": summary["sample_count"],
-        "sample_sequence_start": summary["sample_sequence_start"],
-        "sample_sequence_end": summary["sample_sequence_end"],
-        "missing_sample_sequences": summary["missing_sample_sequences"],
-        "median_sample_interval_ms": summary["median_dt_ms"],
-        "approximate_sampling_rate_hz": summary["estimated_rate_hz"],
-        "systolic_mmHg": args.systolic_mmHg,
-        "diastolic_mmHg": args.diastolic_mmHg,
-        "cuff_hr_bpm": args.cuff_hr_bpm,
-        "cuff_timestamp": args.cuff_timestamp or None,
-        "notes": args.notes,
-        "interrupted": interrupted,
-        "ignored_non_csv_lines": ignored_lines,
-        "zoom_plot_start_seconds": zoom_start_s,
-        "zoom_plot_end_seconds": zoom_end_s,
-        "warnings": summary["warnings"],
-    }
+    metadata = build_metadata(
+        args,
+        summary,
+        recording_start,
+        interrupted,
+        ignored_lines,
+        zoom_start_s,
+        zoom_end_s,
+    )
     metadata_path.write_text(json.dumps(metadata, indent=2) + "\n", encoding="utf-8")
 
     save_plot(df, plot_path, plt)

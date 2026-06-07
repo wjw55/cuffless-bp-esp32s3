@@ -56,7 +56,7 @@ sample_seq,timestamp_ms,red,ir
 
 Only rows without a leading `#` are data samples. Lines beginning with `#` are status/debug comments and are safe for the Python collector to ignore.
 
-## Collect A 90-Second PPG Recording
+## Collect A 90-Second PPG-Only Recording
 
 Close `idf.py monitor` first because only one program can use the serial port at a time.
 
@@ -64,11 +64,11 @@ Close `idf.py monitor` first because only one program can use the serial port at
 python tools\collect_ppg.py `
   --port COM3 `
   --duration 90 `
-  --subject S01 `
+  --subject test `
   --session baseline_001 `
-  --trial-id T01 `
+  --trial-id ppg_only_001 `
   --posture seated `
-  --sensor-location index_finger `
+  --sensor-location right_index_finger `
   --ppg-hand right `
   --cuff-arm left `
   --notes "Unlabeled stability check before BP collection"
@@ -102,8 +102,29 @@ Do not start Omron-labeled BP data collection until raw PPG capture is stable. F
 - The quick-look and zoom plots show a visible pulse waveform without saturation.
 - The metadata JSON has the correct subject, session, trial, posture, sensor location, cuff arm, and PPG hand.
 
-Once stable, optional BP fields can be added to the collector command:
+## Omron-Labeled Pilot Setup
+
+For the first pilot, keep the protocol deliberately small and repeatable:
+
+- Omron cuff on left upper arm.
+- MAX30102 PPG sensor on right index finger or right middle finger.
+- Seated posture, back supported, feet flat.
+- Both arms supported on a table.
+- Start the Omron measurement around 20-30 seconds after PPG recording begins.
+- Do not talk or move during recording.
+- Rest 1-2 minutes between trials.
+- Do only 3 labeled trials first.
+
+## Collect A 90-Second Omron-Labeled Pilot Recording
 
 ```powershell
-python tools\collect_ppg.py --port COM3 --duration 90 --subject S01 --session bp_001 --trial-id T01 --posture seated --sensor-location index_finger --ppg-hand right --cuff-arm left --systolic-mmhg 118 --diastolic-mmhg 76 --cuff-hr-bpm 72 --cuff-timestamp 2026-06-07T20:15:00+08:00
+python tools\collect_ppg.py --port COM3 --duration 90 --subject test --session omron_pilot_001 --trial-id omron_001 --posture seated --sensor-location right_index_finger --cuff-arm left --ppg-hand right --systolic-mmHg 118 --diastolic-mmHg 76 --cuff-hr-bpm 72 --cuff-start-time-s 25 --cuff-reading-time-s 55 --notes "Omron pilot trial 1"
 ```
+
+The CSV remains raw signal only:
+
+```csv
+sample_seq,timestamp_ms,red,ir
+```
+
+BP and protocol fields are saved in the metadata JSON next to the CSV, not mixed into the signal file.
