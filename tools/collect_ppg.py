@@ -108,6 +108,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Optional time in seconds when the cuff reading appeared relative to PPG recording start",
     )
     parser.add_argument("--cuff-timestamp", default="", help="Optional cuff reading timestamp, ideally ISO 8601")
+    parser.add_argument(
+        "--prompt-bp-after",
+        action="store_true",
+        help="Prompt for Omron BP values after recording finishes and before metadata is saved",
+    )
     parser.add_argument("--outdir", default="data/raw", help="Output folder, default data/raw")
     parser.add_argument("--plot-start", type=nonnegative_float, help="Zoom plot start time in seconds")
     parser.add_argument("--plot-end", type=nonnegative_float, help="Zoom plot end time in seconds")
@@ -128,6 +133,103 @@ def validate_collection_args(args: argparse.Namespace, parser: argparse.Argument
             if parser is not None:
                 parser.error(message)
             raise SystemExit(f"ERROR: {message}")
+
+    return args
+
+
+def optional_prompt_suffix(value) -> str:
+    if value is None or value == "":
+        return ""
+
+    return f" [{value}]"
+
+
+def prompt_optional_positive_int(
+    label: str,
+    current_value: int | None,
+    input_func=input,
+    output_func=print,
+) -> int | None:
+    while True:
+        raw_value = input_func(f"{label}{optional_prompt_suffix(current_value)}: ").strip()
+        if raw_value == "":
+            return current_value
+
+        try:
+            return positive_int(raw_value)
+        except argparse.ArgumentTypeError as exc:
+            output_func(f"Invalid {label}: {exc}")
+
+
+def prompt_optional_recording_time(
+    label: str,
+    current_value: float | None,
+    duration_s: float,
+    input_func=input,
+    output_func=print,
+) -> float | None:
+    while True:
+        raw_value = input_func(f"{label}{optional_prompt_suffix(current_value)}: ").strip()
+        if raw_value == "":
+            return current_value
+
+        try:
+            parsed = nonnegative_float(raw_value)
+        except argparse.ArgumentTypeError as exc:
+            output_func(f"Invalid {label}: {exc}")
+            continue
+
+        if parsed > duration_s:
+            output_func(f"Invalid {label}: must be between 0 and recording duration ({duration_s:g} s)")
+            continue
+
+        return parsed
+
+
+def append_prompt_notes(existing_notes: str, prompted_notes: str) -> str:
+    cleaned_existing = existing_notes.strip()
+    cleaned_prompted = prompted_notes.strip()
+
+    if not cleaned_prompted:
+        return existing_notes
+
+    if cleaned_existing:
+        return f"{cleaned_existing} | {cleaned_prompted}"
+
+    return cleaned_prompted
+
+
+def apply_prompt_bp_after(args: argparse.Namespace, input_func=input, output_func=print) -> argparse.Namespace:
+    output_func("\nEnter Omron BP values. Leave blank to keep existing values or omit optional fields.")
+
+    args.systolic_mmHg = prompt_optional_positive_int(
+        "Systolic mmHg",
+        args.systolic_mmHg,
+        input_func,
+        output_func,
+    )
+    args.diastolic_mmHg = prompt_optional_positive_int(
+        "Diastolic mmHg",
+        args.diastolic_mmHg,
+        input_func,
+        output_func,
+    )
+    args.cuff_hr_bpm = prompt_optional_positive_int(
+        "Omron HR bpm",
+        args.cuff_hr_bpm,
+        input_func,
+        output_func,
+    )
+    args.cuff_reading_time_s = prompt_optional_recording_time(
+        "Cuff reading time s",
+        args.cuff_reading_time_s,
+        args.duration,
+        input_func,
+        output_func,
+    )
+
+    prompted_notes = input_func(f"Additional notes{optional_prompt_suffix(args.notes)}: ")
+    args.notes = append_prompt_notes(args.notes, prompted_notes)
 
     return args
 
@@ -460,6 +562,7 @@ def build_metadata(
         "cuff_start_time_s": args.cuff_start_time_s,
         "cuff_reading_time_s": args.cuff_reading_time_s,
         "cuff_timestamp": args.cuff_timestamp or None,
+        "prompt_bp_after": args.prompt_bp_after,
         "notes": args.notes,
         "interrupted": interrupted,
         "ignored_non_csv_lines": ignored_lines,
@@ -541,6 +644,9 @@ def main() -> int:
     except ValueError as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         return 1
+
+    if args.prompt_bp_after:
+        args = apply_prompt_bp_after(args)
 
     metadata = build_metadata(
         args,

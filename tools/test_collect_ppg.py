@@ -8,7 +8,7 @@ import sys
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from collect_ppg import build_metadata, parse_args, parse_ppg_row, validate_collection_args
+from collect_ppg import apply_prompt_bp_after, build_metadata, parse_args, parse_ppg_row, validate_collection_args
 
 
 class ParsePpgRowTests(unittest.TestCase):
@@ -38,6 +38,7 @@ def make_args(**overrides):
         "cuff_reading_time_s": None,
         "cuff_timestamp": "",
         "notes": "",
+        "prompt_bp_after": False,
     }
     defaults.update(overrides)
     return Namespace(**defaults)
@@ -151,6 +152,71 @@ class MetadataTests(unittest.TestCase):
         self.assertEqual(args.cuff_hr_bpm, 72)
         self.assertEqual(args.cuff_start_time_s, 25.0)
         self.assertEqual(args.cuff_reading_time_s, 55.0)
+
+    def test_prompt_bp_after_blank_inputs_keep_existing_values(self):
+        args = make_args(
+            systolic_mmHg=118,
+            diastolic_mmHg=76,
+            cuff_hr_bpm=72,
+            cuff_reading_time_s=55.0,
+            notes="Omron pilot trial 1",
+        )
+        responses = iter(["", "", "", "", ""])
+
+        updated = apply_prompt_bp_after(args, input_func=lambda _prompt: next(responses), output_func=lambda _text: None)
+
+        self.assertEqual(updated.systolic_mmHg, 118)
+        self.assertEqual(updated.diastolic_mmHg, 76)
+        self.assertEqual(updated.cuff_hr_bpm, 72)
+        self.assertEqual(updated.cuff_reading_time_s, 55.0)
+        self.assertEqual(updated.notes, "Omron pilot trial 1")
+
+    def test_prompt_bp_after_entered_values_override_cli_values(self):
+        args = make_args(
+            systolic_mmHg=110,
+            diastolic_mmHg=70,
+            cuff_hr_bpm=65,
+            cuff_reading_time_s=50.0,
+            notes="Omron pilot trial 1",
+        )
+        responses = iter(["118", "76", "72", "55", "Reading appeared stable"])
+
+        updated = apply_prompt_bp_after(args, input_func=lambda _prompt: next(responses), output_func=lambda _text: None)
+
+        self.assertEqual(updated.systolic_mmHg, 118)
+        self.assertEqual(updated.diastolic_mmHg, 76)
+        self.assertEqual(updated.cuff_hr_bpm, 72)
+        self.assertEqual(updated.cuff_reading_time_s, 55.0)
+        self.assertEqual(updated.notes, "Omron pilot trial 1 | Reading appeared stable")
+
+    def test_prompt_bp_after_reprompts_invalid_values(self):
+        args = make_args()
+        responses = iter(["0", "118", "", "", "91", "55", ""])
+        messages = []
+
+        updated = apply_prompt_bp_after(args, input_func=lambda _prompt: next(responses), output_func=messages.append)
+
+        self.assertEqual(updated.systolic_mmHg, 118)
+        self.assertIsNone(updated.diastolic_mmHg)
+        self.assertIsNone(updated.cuff_hr_bpm)
+        self.assertEqual(updated.cuff_reading_time_s, 55.0)
+        self.assertTrue(any("must be greater than 0" in message for message in messages))
+        self.assertTrue(any("must be between 0 and recording duration" in message for message in messages))
+
+    def test_parses_prompt_bp_after_flag(self):
+        args = parse_args([
+            "--port",
+            "COM3",
+            "--duration",
+            "90",
+            "--subject",
+            "test",
+            "--session",
+            "omron_pilot_001",
+            "--prompt-bp-after",
+        ])
+
+        self.assertTrue(args.prompt_bp_after)
 
     def test_rejects_invalid_bp_values(self):
         invalid_options = [

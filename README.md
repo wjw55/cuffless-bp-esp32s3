@@ -118,8 +118,10 @@ For the first pilot, keep the protocol deliberately small and repeatable:
 ## Collect A 90-Second Omron-Labeled Pilot Recording
 
 ```powershell
-python tools\collect_ppg.py --port COM3 --duration 90 --subject test --session omron_pilot_001 --trial-id omron_001 --posture seated --sensor-location right_index_finger --cuff-arm left --ppg-hand right --systolic-mmHg 118 --diastolic-mmHg 76 --cuff-hr-bpm 72 --cuff-start-time-s 25 --cuff-reading-time-s 55 --notes "Omron pilot trial 1"
+python tools\collect_ppg.py --port COM3 --duration 90 --subject test --session omron_pilot_001 --trial-id omron_001 --posture seated --sensor-location right_index_finger --cuff-arm left --ppg-hand right --cuff-start-time-s 25 --notes "Omron pilot trial 1" --prompt-bp-after
 ```
+
+After recording finishes, enter the Omron systolic BP, diastolic BP, cuff HR, cuff reading time, and any extra notes when prompted. Leave a prompt blank to omit that field or keep a value already supplied by CLI.
 
 The CSV remains raw signal only:
 
