@@ -5,10 +5,19 @@ from datetime import datetime, timezone
 from io import StringIO
 from pathlib import Path
 import sys
+from tempfile import TemporaryDirectory
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from collect_ppg import apply_prompt_bp_after, build_metadata, parse_args, parse_ppg_row, validate_collection_args
+from collect_ppg import (
+    apply_prompt_bp_after,
+    build_metadata,
+    build_output_paths,
+    ensure_output_paths_available,
+    parse_args,
+    parse_ppg_row,
+    validate_collection_args,
+)
 
 
 class ParsePpgRowTests(unittest.TestCase):
@@ -82,6 +91,23 @@ class MetadataTests(unittest.TestCase):
         self.assertIsNone(metadata["cuff_start_time_s"])
         self.assertIsNone(metadata["cuff_reading_time_s"])
         self.assertEqual(metadata["notes"], "Stable PPG-only check")
+
+    def test_metadata_includes_output_csv_path_when_available(self):
+        csv_path = Path("data/raw/test_omron_pilot_001_omron_001_ppg.csv")
+
+        metadata = build_metadata(
+            make_args(session="omron_pilot_001", trial_id="omron_001"),
+            make_summary(),
+            datetime(2026, 6, 7, 20, 0, tzinfo=timezone.utc),
+            interrupted=False,
+            ignored_lines=0,
+            zoom_start_s=20.0,
+            zoom_end_s=30.0,
+            csv_path=csv_path,
+        )
+
+        self.assertEqual(metadata["output_csv_filename"], "test_omron_pilot_001_omron_001_ppg.csv")
+        self.assertEqual(metadata["output_csv_path"], str(csv_path))
 
     def test_builds_omron_labeled_metadata_with_bp_fields(self):
         metadata = build_metadata(
@@ -252,6 +278,55 @@ class MetadataTests(unittest.TestCase):
             with self.subTest(overrides=overrides):
                 with self.assertRaises(SystemExit):
                     validate_collection_args(make_args(**overrides))
+
+
+class OutputPathTests(unittest.TestCase):
+    def test_different_trial_ids_produce_different_output_filenames(self):
+        outdir = Path("data/raw")
+
+        trial_1 = build_output_paths(outdir, "test", "omron_pilot_001", "omron_001")
+        trial_2 = build_output_paths(outdir, "test", "omron_pilot_001", "omron_002")
+
+        self.assertEqual(trial_1["csv"].name, "test_omron_pilot_001_omron_001_ppg.csv")
+        self.assertEqual(trial_2["csv"].name, "test_omron_pilot_001_omron_002_ppg.csv")
+        self.assertNotEqual(trial_1["csv"], trial_2["csv"])
+        self.assertEqual(trial_1["metadata"].name, "test_omron_pilot_001_omron_001_metadata.json")
+        self.assertEqual(trial_1["plot"].name, "test_omron_pilot_001_omron_001_plot.png")
+        self.assertEqual(trial_1["zoom_plot"].name, "test_omron_pilot_001_omron_001_zoom_plot.png")
+
+    def test_existing_output_file_is_not_overwritten_by_default(self):
+        with TemporaryDirectory() as tmpdir:
+            paths = build_output_paths(Path(tmpdir), "test", "session", "trial_001")
+            paths["csv"].write_text("existing\n", encoding="utf-8")
+
+            with self.assertRaises(FileExistsError) as context:
+                ensure_output_paths_available(paths, overwrite=False)
+
+            self.assertIn(str(paths["csv"]), str(context.exception))
+
+    def test_overwrite_allows_existing_output_file(self):
+        with TemporaryDirectory() as tmpdir:
+            paths = build_output_paths(Path(tmpdir), "test", "session", "trial_001")
+            paths["csv"].write_text("existing\n", encoding="utf-8")
+
+            ensure_output_paths_available(paths, overwrite=True)
+
+    def test_parses_overwrite_flag(self):
+        args = parse_args([
+            "--port",
+            "COM3",
+            "--duration",
+            "90",
+            "--subject",
+            "test",
+            "--session",
+            "session",
+            "--trial-id",
+            "trial_001",
+            "--overwrite",
+        ])
+
+        self.assertTrue(args.overwrite)
 
 
 if __name__ == "__main__":

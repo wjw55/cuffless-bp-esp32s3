@@ -114,6 +114,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Prompt for Omron BP values after recording finishes and before metadata is saved",
     )
     parser.add_argument("--outdir", default="data/raw", help="Output folder, default data/raw")
+    parser.add_argument("--overwrite", action="store_true", help="Allow replacing existing output files")
     parser.add_argument("--plot-start", type=nonnegative_float, help="Zoom plot start time in seconds")
     parser.add_argument("--plot-end", type=nonnegative_float, help="Zoom plot end time in seconds")
     args = parser.parse_args(argv)
@@ -290,9 +291,29 @@ def import_dependencies():
 
 
 def safe_name(value: str) -> str:
-    """Make subject/session values safe for Windows filenames."""
+    """Make metadata values safe for Windows filenames."""
     cleaned = re.sub(r"[^A-Za-z0-9_.-]+", "_", value.strip())
     return cleaned or "unknown"
+
+
+def build_output_paths(outdir: Path, subject: str, session: str, trial_id: str) -> dict[str, Path]:
+    prefix = f"{safe_name(subject)}_{safe_name(session)}_{safe_name(trial_id)}"
+
+    return {
+        "csv": outdir / f"{prefix}_ppg.csv",
+        "metadata": outdir / f"{prefix}_metadata.json",
+        "plot": outdir / f"{prefix}_plot.png",
+        "zoom_plot": outdir / f"{prefix}_zoom_plot.png",
+    }
+
+
+def ensure_output_paths_available(paths: dict[str, Path], overwrite: bool) -> None:
+    if overwrite:
+        return
+
+    for path in paths.values():
+        if path.exists():
+            raise FileExistsError(f"Output file already exists: {path}. Use --overwrite to replace it.")
 
 
 def parse_ppg_row(line: str) -> tuple[int, int, int, int] | None:
@@ -535,11 +556,14 @@ def build_metadata(
     ignored_lines: int,
     zoom_start_s: float,
     zoom_end_s: float,
+    csv_path: Path | None = None,
 ) -> dict:
     return {
         "subject_id": args.subject,
         "session_id": args.session,
         "trial_id": args.trial_id,
+        "output_csv_filename": csv_path.name if csv_path is not None else None,
+        "output_csv_path": str(csv_path) if csv_path is not None else None,
         "posture": args.posture,
         "sensor_location": args.sensor_location,
         "cuff_arm": args.cuff_arm,
@@ -588,11 +612,17 @@ def main() -> int:
     outdir = Path(args.outdir)
     outdir.mkdir(parents=True, exist_ok=True)
 
-    prefix = f"{safe_name(args.subject)}_{safe_name(args.session)}"
-    csv_path = outdir / f"{prefix}_ppg.csv"
-    metadata_path = outdir / f"{prefix}_metadata.json"
-    plot_path = outdir / f"{prefix}_plot.png"
-    zoom_plot_path = outdir / f"{prefix}_zoom_plot.png"
+    output_paths = build_output_paths(outdir, args.subject, args.session, args.trial_id)
+    try:
+        ensure_output_paths_available(output_paths, args.overwrite)
+    except FileExistsError as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return 1
+
+    csv_path = output_paths["csv"]
+    metadata_path = output_paths["metadata"]
+    plot_path = output_paths["plot"]
+    zoom_plot_path = output_paths["zoom_plot"]
 
     rows: list[tuple[int, int, int, int]] = []
     ignored_lines = 0
@@ -656,6 +686,7 @@ def main() -> int:
         ignored_lines,
         zoom_start_s,
         zoom_end_s,
+        csv_path,
     )
     metadata_path.write_text(json.dumps(metadata, indent=2) + "\n", encoding="utf-8")
 

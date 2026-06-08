@@ -76,10 +76,12 @@ python tools\collect_ppg.py `
 
 The collector saves:
 
-- `data/raw/<subject>_<session>_ppg.csv`
-- `data/raw/<subject>_<session>_metadata.json`
-- `data/raw/<subject>_<session>_plot.png`
-- `data/raw/<subject>_<session>_zoom_plot.png`
+- `data/raw/<subject>_<session>_<trial_id>_ppg.csv`
+- `data/raw/<subject>_<session>_<trial_id>_metadata.json`
+- `data/raw/<subject>_<session>_<trial_id>_plot.png`
+- `data/raw/<subject>_<session>_<trial_id>_zoom_plot.png`
+
+Existing output files are not overwritten by default. Use `--overwrite` only when you intentionally want to replace a previous recording.
 
 ## CSV Format
 
