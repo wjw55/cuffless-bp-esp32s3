@@ -132,3 +132,31 @@ sample_seq,timestamp_ms,red,ir
 ```
 
 BP and protocol fields are saved in the metadata JSON next to the CSV, not mixed into the signal file.
+
+## Analyze Omron Pilot Trials
+
+After collecting a small pilot session, summarize trial quality before using any data for later modeling:
+
+```powershell
+python tools\analyze_trials.py --input-dir data\raw --session omron_pilot_001
+```
+
+Optional filters and diagnostics:
+
+```powershell
+python tools\analyze_trials.py --input-dir data\raw --session omron_pilot_001 --subject test --make-plots --verbose
+```
+
+The analyzer is for pilot data validation only. It does not train a blood pressure model and does not predict BP. It reads the raw CSV and matching metadata JSON files, then writes:
+
+- `data/processed/<session_id>/session_summary.csv`
+- `data/processed/<session_id>/session_summary.json`
+- `data/processed/<session_id>/plots/<trial_id>_ir_peaks.png` when `--make-plots` is used
+
+`analysis_quality` is a practical triage label:
+
+- `usable`: timing is good or usable, no missing samples, enough IR peaks, and PPG HR is plausible.
+- `borderline`: timing is borderline, metadata warnings exist, signal span is small, or PPG HR differs from Omron HR by more than 10 bpm.
+- `reject`: missing CSV/metadata, missing sample sequences, rejected timing, too few peaks, or no plausible PPG HR estimate.
+
+For future modeling, start with only `usable` trials. Review `borderline` trials manually with the generated peak plots before deciding whether to keep them.
