@@ -7,6 +7,8 @@ from pathlib import Path
 import sys
 from tempfile import TemporaryDirectory
 
+import pandas as pd
+
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from collect_ppg import (
@@ -16,6 +18,7 @@ from collect_ppg import (
     ensure_output_paths_available,
     parse_args,
     parse_ppg_row,
+    summarize,
     validate_collection_args,
 )
 
@@ -61,9 +64,34 @@ def make_summary():
         "sample_sequence_end": 8971,
         "missing_sample_sequences": 0,
         "median_dt_ms": 10.0,
+        "mean_sample_interval_ms": 10.0,
+        "min_sample_interval_ms": 10.0,
+        "max_sample_interval_ms": 10.0,
+        "p95_sample_interval_ms": 10.0,
+        "p99_sample_interval_ms": 10.0,
+        "timestamp_gaps_gt_15ms": 0,
+        "timestamp_gaps_gt_20ms": 0,
+        "non_increasing_timestamp_count": 0,
+        "timestamp_irregularity_reason": None,
+        "timing_quality": "good",
+        "timing_quality_reason": "No missing samples, monotonic timestamps, and all intervals <= 15 ms.",
         "estimated_rate_hz": 100.0,
         "warnings": [],
     }
+
+
+def make_ppg_df(timestamps_ms, sample_seq=None):
+    if sample_seq is None:
+        sample_seq = list(range(len(timestamps_ms)))
+
+    return pd.DataFrame(
+        {
+            "sample_seq": sample_seq,
+            "timestamp_ms": timestamps_ms,
+            "red": [60000] * len(timestamps_ms),
+            "ir": [70000] * len(timestamps_ms),
+        }
+    )
 
 
 class MetadataTests(unittest.TestCase):
@@ -108,6 +136,32 @@ class MetadataTests(unittest.TestCase):
 
         self.assertEqual(metadata["output_csv_filename"], "test_omron_pilot_001_omron_001_ppg.csv")
         self.assertEqual(metadata["output_csv_path"], str(csv_path))
+
+    def test_metadata_includes_timestamp_diagnostics(self):
+        metadata = build_metadata(
+            make_args(),
+            make_summary(),
+            datetime(2026, 6, 7, 20, 0, tzinfo=timezone.utc),
+            interrupted=False,
+            ignored_lines=0,
+            zoom_start_s=20.0,
+            zoom_end_s=30.0,
+        )
+
+        self.assertEqual(metadata["mean_sample_interval_ms"], 10.0)
+        self.assertEqual(metadata["min_sample_interval_ms"], 10.0)
+        self.assertEqual(metadata["max_sample_interval_ms"], 10.0)
+        self.assertEqual(metadata["p95_sample_interval_ms"], 10.0)
+        self.assertEqual(metadata["p99_sample_interval_ms"], 10.0)
+        self.assertEqual(metadata["timestamp_gaps_gt_15ms"], 0)
+        self.assertEqual(metadata["timestamp_gaps_gt_20ms"], 0)
+        self.assertEqual(metadata["non_increasing_timestamp_count"], 0)
+        self.assertIsNone(metadata["timestamp_irregularity_reason"])
+        self.assertEqual(metadata["timing_quality"], "good")
+        self.assertEqual(
+            metadata["timing_quality_reason"],
+            "No missing samples, monotonic timestamps, and all intervals <= 15 ms.",
+        )
 
     def test_builds_omron_labeled_metadata_with_bp_fields(self):
         metadata = build_metadata(
@@ -327,6 +381,93 @@ class OutputPathTests(unittest.TestCase):
         ])
 
         self.assertTrue(args.overwrite)
+
+
+class TimestampDiagnosticsTests(unittest.TestCase):
+    def test_regular_10ms_timestamps_have_clean_diagnostics(self):
+        summary = summarize(make_ppg_df([0, 10, 20, 30, 40, 50]), requested_duration_s=0.05)
+
+        self.assertEqual(summary["median_dt_ms"], 10.0)
+        self.assertEqual(summary["mean_sample_interval_ms"], 10.0)
+        self.assertEqual(summary["min_sample_interval_ms"], 10.0)
+        self.assertEqual(summary["max_sample_interval_ms"], 10.0)
+        self.assertEqual(summary["p95_sample_interval_ms"], 10.0)
+        self.assertEqual(summary["p99_sample_interval_ms"], 10.0)
+        self.assertEqual(summary["timestamp_gaps_gt_15ms"], 0)
+        self.assertEqual(summary["timestamp_gaps_gt_20ms"], 0)
+        self.assertEqual(summary["non_increasing_timestamp_count"], 0)
+        self.assertIsNone(summary["timestamp_irregularity_reason"])
+        self.assertEqual(summary["timing_quality"], "good")
+        self.assertNotIn("Timestamps", " ".join(summary["warnings"]))
+
+    def test_20ms_timestamp_intervals_are_usable_without_warning(self):
+        timestamps = []
+        current = 0
+        for index in range(80):
+            timestamps.append(current)
+            current += 20 if index % 3 == 0 else 10
+
+        summary = summarize(make_ppg_df(timestamps), requested_duration_s=current / 1000.0)
+
+        self.assertEqual(summary["max_sample_interval_ms"], 20.0)
+        self.assertGreater(summary["timestamp_gaps_gt_15ms"], 0)
+        self.assertEqual(summary["timestamp_gaps_gt_20ms"], 0)
+        self.assertEqual(summary["non_increasing_timestamp_count"], 0)
+        self.assertEqual(summary["timing_quality"], "usable")
+        self.assertIn("max_dt=20.0 ms", summary["timing_quality_reason"])
+        self.assertFalse(any("Timing" in warning or "Timestamps irregular" in warning for warning in summary["warnings"]))
+
+    def test_rare_large_timestamp_gap_is_borderline(self):
+        timestamps = [index * 10 for index in range(100)]
+        timestamps[50:] = [timestamp + 30 for timestamp in timestamps[50:]]
+
+        summary = summarize(make_ppg_df(timestamps), requested_duration_s=1.02)
+
+        self.assertEqual(summary["timestamp_gaps_gt_15ms"], 1)
+        self.assertEqual(summary["timestamp_gaps_gt_20ms"], 1)
+        self.assertEqual(summary["max_sample_interval_ms"], 40.0)
+        self.assertEqual(summary["timing_quality"], "borderline")
+        self.assertIn("gaps_gt_20ms=1", summary["timing_quality_reason"])
+        self.assertIn("Timing borderline", summary["warnings"][-1])
+
+    def test_many_large_timestamp_gaps_are_rejected(self):
+        timestamps = [index * 10 for index in range(80)]
+        for gap_index in [10, 20, 30, 40, 50, 60]:
+            timestamps[gap_index:] = [timestamp + 15 for timestamp in timestamps[gap_index:]]
+
+        summary = summarize(make_ppg_df(timestamps), requested_duration_s=0.88)
+
+        self.assertEqual(summary["timestamp_gaps_gt_20ms"], 6)
+        self.assertEqual(summary["timing_quality"], "reject")
+        self.assertIn("gaps_gt_20ms=6", summary["timing_quality_reason"])
+        self.assertIn("Timing reject", summary["warnings"][-1])
+
+    def test_missing_sample_sequence_is_rejected_even_with_regular_timestamps(self):
+        summary = summarize(
+            make_ppg_df([0, 10, 20, 30], sample_seq=[0, 1, 3, 4]),
+            requested_duration_s=0.03,
+        )
+
+        self.assertEqual(summary["missing_sample_sequences"], 1)
+        self.assertEqual(summary["timing_quality"], "reject")
+        self.assertIn("missing_sequences=1", summary["timing_quality_reason"])
+
+    def test_interval_over_40ms_is_rejected(self):
+        summary = summarize(make_ppg_df([0, 10, 20, 70, 80]), requested_duration_s=0.08)
+
+        self.assertEqual(summary["max_sample_interval_ms"], 50.0)
+        self.assertEqual(summary["timing_quality"], "reject")
+        self.assertIn("max_dt=50.0 ms", summary["timing_quality_reason"])
+
+    def test_non_increasing_timestamps_have_specific_diagnostics(self):
+        summary = summarize(make_ppg_df([0, 10, 10, 20, 15, 30]), requested_duration_s=0.03)
+
+        self.assertEqual(summary["non_increasing_timestamp_count"], 2)
+        self.assertEqual(summary["min_sample_interval_ms"], -5.0)
+        self.assertEqual(summary["timestamp_gaps_gt_15ms"], 0)
+        self.assertEqual(summary["timing_quality"], "reject")
+        self.assertIn("non_increasing=2", summary["timing_quality_reason"])
+        self.assertIn("Timing reject", summary["warnings"][-1])
 
 
 if __name__ == "__main__":

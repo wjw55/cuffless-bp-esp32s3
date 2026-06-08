@@ -343,14 +343,75 @@ def parse_ppg_row(line: str) -> tuple[int, int, int, int] | None:
     return sample_seq, timestamp_ms, red, ir
 
 
+def classify_timing_quality(
+    missing_sample_sequences: int,
+    non_increasing_timestamp_count: int,
+    timestamp_gaps_gt_15ms: int,
+    timestamp_gaps_gt_20ms: int,
+    max_sample_interval_ms: float | None,
+) -> tuple[str, str]:
+    if max_sample_interval_ms is None:
+        return "reject", "Fewer than 2 timestamped samples; cannot evaluate timing quality."
+
+    if (
+        missing_sample_sequences > 0
+        or non_increasing_timestamp_count > 0
+        or timestamp_gaps_gt_20ms > 5
+        or max_sample_interval_ms > 40
+    ):
+        return (
+            "reject",
+            f"missing_sequences={missing_sample_sequences}, non_increasing={non_increasing_timestamp_count}, "
+            f"max_dt={max_sample_interval_ms:.1f} ms, gaps_gt_15ms={timestamp_gaps_gt_15ms}, "
+            f"gaps_gt_20ms={timestamp_gaps_gt_20ms}",
+        )
+
+    if (
+        missing_sample_sequences == 0
+        and non_increasing_timestamp_count == 0
+        and timestamp_gaps_gt_15ms == 0
+        and max_sample_interval_ms <= 15
+    ):
+        return "good", "No missing samples, monotonic timestamps, and all intervals <= 15 ms."
+
+    if (
+        missing_sample_sequences == 0
+        and non_increasing_timestamp_count == 0
+        and timestamp_gaps_gt_20ms == 0
+        and max_sample_interval_ms <= 20
+    ):
+        return (
+            "usable",
+            f"No missing samples or >20 ms gaps; max_dt={max_sample_interval_ms:.1f} ms, "
+            f"gaps_gt_15ms={timestamp_gaps_gt_15ms}.",
+        )
+
+    return (
+        "borderline",
+        f"No missing samples, but timing has larger gaps; max_dt={max_sample_interval_ms:.1f} ms, "
+        f"gaps_gt_15ms={timestamp_gaps_gt_15ms}, gaps_gt_20ms={timestamp_gaps_gt_20ms}.",
+    )
+
+
 def summarize(df, requested_duration_s: float) -> dict:
     sample_count = int(len(df))
     data_duration_s = None
     median_dt_ms = None
+    mean_sample_interval_ms = None
+    min_sample_interval_ms = None
+    max_sample_interval_ms = None
+    p95_sample_interval_ms = None
+    p99_sample_interval_ms = None
     estimated_rate_hz = None
     red_min = red_max = ir_min = ir_max = None
     sample_sequence_start = sample_sequence_end = None
     missing_sample_sequences = 0
+    timestamp_gaps_gt_15ms = 0
+    timestamp_gaps_gt_20ms = 0
+    non_increasing_timestamp_count = 0
+    timestamp_irregularity_reason = None
+    timing_quality = None
+    timing_quality_reason = None
     warnings = []
 
     if sample_count == 0:
@@ -382,24 +443,54 @@ def summarize(df, requested_duration_s: float) -> dict:
     if sample_count >= 2:
         data_duration_s = float((df["timestamp_ms"].iloc[-1] - df["timestamp_ms"].iloc[0]) / 1000.0)
         dt_ms = df["timestamp_ms"].diff().dropna()
-        median_dt = float(dt_ms.median())
-        median_dt_ms = median_dt
+        median_dt_ms = float(dt_ms.median())
+        mean_sample_interval_ms = float(dt_ms.mean())
+        min_sample_interval_ms = float(dt_ms.min())
+        max_sample_interval_ms = float(dt_ms.max())
+        p95_sample_interval_ms = float(dt_ms.quantile(0.95))
+        p99_sample_interval_ms = float(dt_ms.quantile(0.99))
+        timestamp_gaps_gt_15ms = int((dt_ms > 15).sum())
+        timestamp_gaps_gt_20ms = int((dt_ms > 20).sum())
+        non_increasing_timestamp_count = int((dt_ms <= 0).sum())
 
-        if median_dt > 0:
-            estimated_rate_hz = 1000.0 / median_dt
-        else:
-            warnings.append("Timestamps are not increasing.")
+        if median_dt_ms > 0:
+            estimated_rate_hz = 1000.0 / median_dt_ms
 
-        irregular_limit_ms = max(5.0, median_dt * 0.30)
-        irregular_fraction = float(((dt_ms - median_dt).abs() > irregular_limit_ms).mean())
-        if irregular_fraction > 0.05 or bool((dt_ms <= 0).any()):
-            warnings.append("Timestamps look irregular: check serial drops or firmware timing.")
+        timing_quality, timing_quality_reason = classify_timing_quality(
+            missing_sample_sequences,
+            non_increasing_timestamp_count,
+            timestamp_gaps_gt_15ms,
+            timestamp_gaps_gt_20ms,
+            max_sample_interval_ms,
+        )
+
+        if timing_quality in {"borderline", "reject"}:
+            timestamp_irregularity_reason = (
+                f"p99_dt={p99_sample_interval_ms:.1f} ms, max_dt={max_sample_interval_ms:.1f} ms, "
+                f"gaps_gt_15ms={timestamp_gaps_gt_15ms}, gaps_gt_20ms={timestamp_gaps_gt_20ms}, "
+                f"non_increasing={non_increasing_timestamp_count}"
+            )
+            warnings.append(f"Timing {timing_quality}: {timing_quality_reason}")
+    else:
+        timing_quality, timing_quality_reason = classify_timing_quality(
+            missing_sample_sequences,
+            non_increasing_timestamp_count,
+            timestamp_gaps_gt_15ms,
+            timestamp_gaps_gt_20ms,
+            max_sample_interval_ms,
+        )
+        warnings.append(f"Timing {timing_quality}: {timing_quality_reason}")
 
     return {
         "sample_count": sample_count,
         "requested_duration_s": requested_duration_s,
         "data_duration_s": data_duration_s,
         "median_dt_ms": median_dt_ms,
+        "mean_sample_interval_ms": mean_sample_interval_ms,
+        "min_sample_interval_ms": min_sample_interval_ms,
+        "max_sample_interval_ms": max_sample_interval_ms,
+        "p95_sample_interval_ms": p95_sample_interval_ms,
+        "p99_sample_interval_ms": p99_sample_interval_ms,
         "estimated_rate_hz": estimated_rate_hz,
         "red_min": red_min,
         "red_max": red_max,
@@ -408,6 +499,12 @@ def summarize(df, requested_duration_s: float) -> dict:
         "sample_sequence_start": sample_sequence_start,
         "sample_sequence_end": sample_sequence_end,
         "missing_sample_sequences": missing_sample_sequences,
+        "timestamp_gaps_gt_15ms": timestamp_gaps_gt_15ms,
+        "timestamp_gaps_gt_20ms": timestamp_gaps_gt_20ms,
+        "non_increasing_timestamp_count": non_increasing_timestamp_count,
+        "timestamp_irregularity_reason": timestamp_irregularity_reason,
+        "timing_quality": timing_quality,
+        "timing_quality_reason": timing_quality_reason,
         "warnings": warnings,
     }
 
@@ -524,6 +621,14 @@ def print_summary(
     print(f"  requested duration: {summary['requested_duration_s']:.2f} s")
     print(f"  data duration: {format_optional(summary['data_duration_s'])} s")
     print(f"  median dt: {format_optional(summary['median_dt_ms'])} ms")
+    print(f"  mean dt: {format_optional(summary['mean_sample_interval_ms'])} ms")
+    print(
+        "  dt min/p95/p99/max: "
+        f"{format_optional(summary['min_sample_interval_ms'])} / "
+        f"{format_optional(summary['p95_sample_interval_ms'])} / "
+        f"{format_optional(summary['p99_sample_interval_ms'])} / "
+        f"{format_optional(summary['max_sample_interval_ms'])} ms"
+    )
     print(f"  estimated sampling rate: {format_optional(summary['estimated_rate_hz'])} Hz")
     print(f"  red min/max: {format_optional(summary['red_min'], 0)} / {format_optional(summary['red_max'], 0)}")
     print(f"  ir min/max: {format_optional(summary['ir_min'], 0)} / {format_optional(summary['ir_max'], 0)}")
@@ -532,6 +637,14 @@ def print_summary(
         f"{format_optional(summary['sample_sequence_start'], 0)}-{format_optional(summary['sample_sequence_end'], 0)}"
     )
     print(f"  missing sample seq: {summary['missing_sample_sequences']}")
+    print(
+        "  timestamp gaps: "
+        f">15 ms={summary['timestamp_gaps_gt_15ms']}, "
+        f">20 ms={summary['timestamp_gaps_gt_20ms']}, "
+        f"non-increasing={summary['non_increasing_timestamp_count']}"
+    )
+    print(f"  timestamp irregularity: {summary['timestamp_irregularity_reason'] or 'none'}")
+    print(f"  timing quality: {summary['timing_quality']} - {summary['timing_quality_reason']}")
 
     if summary["warnings"]:
         print("  warnings:")
@@ -579,6 +692,17 @@ def build_metadata(
         "sample_sequence_end": summary["sample_sequence_end"],
         "missing_sample_sequences": summary["missing_sample_sequences"],
         "median_sample_interval_ms": summary["median_dt_ms"],
+        "mean_sample_interval_ms": summary["mean_sample_interval_ms"],
+        "min_sample_interval_ms": summary["min_sample_interval_ms"],
+        "max_sample_interval_ms": summary["max_sample_interval_ms"],
+        "p95_sample_interval_ms": summary["p95_sample_interval_ms"],
+        "p99_sample_interval_ms": summary["p99_sample_interval_ms"],
+        "timestamp_gaps_gt_15ms": summary["timestamp_gaps_gt_15ms"],
+        "timestamp_gaps_gt_20ms": summary["timestamp_gaps_gt_20ms"],
+        "non_increasing_timestamp_count": summary["non_increasing_timestamp_count"],
+        "timestamp_irregularity_reason": summary["timestamp_irregularity_reason"],
+        "timing_quality": summary["timing_quality"],
+        "timing_quality_reason": summary["timing_quality_reason"],
         "approximate_sampling_rate_hz": summary["estimated_rate_hz"],
         "systolic_mmHg": args.systolic_mmHg,
         "diastolic_mmHg": args.diastolic_mmHg,
