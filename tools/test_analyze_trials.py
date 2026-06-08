@@ -113,6 +113,45 @@ class AnalyzeTrialsTests(unittest.TestCase):
             self.assertGreater(row["ir_span"], 1000)
             self.assertEqual(row["analysis_quality"], "usable")
 
+    def test_usable_timing_ignores_legacy_timestamp_warning(self):
+        with TemporaryDirectory() as tmpdir:
+            input_dir = Path(tmpdir)
+            legacy_warning = "Timestamps irregular: p99_dt=10.0 ms, max_dt=20.0 ms, gaps_gt_20ms=0"
+            write_trial(
+                input_dir,
+                make_metadata(
+                    timing_quality="usable",
+                    timing_quality_reason="No missing samples or >20 ms gaps.",
+                    warnings=[legacy_warning],
+                ),
+            )
+            pair = discover_trial_pairs(input_dir, "omron_pilot_001")[0][0]
+
+            row = build_summary_row(pair)
+
+            self.assertEqual(row["analysis_quality"], "usable")
+            self.assertEqual(row["warnings"], legacy_warning)
+            self.assertEqual(row["ignored_legacy_warnings"], legacy_warning)
+
+    def test_usable_timing_keeps_non_timing_warning_borderline(self):
+        with TemporaryDirectory() as tmpdir:
+            input_dir = Path(tmpdir)
+            warning = "IR signal has repeated flat segments"
+            write_trial(
+                input_dir,
+                make_metadata(
+                    timing_quality="usable",
+                    warnings=[warning],
+                ),
+            )
+            pair = discover_trial_pairs(input_dir, "omron_pilot_001")[0][0]
+
+            row = build_summary_row(pair)
+
+            self.assertEqual(row["analysis_quality"], "borderline")
+            self.assertEqual(row["warnings"], warning)
+            self.assertEqual(row["ignored_legacy_warnings"], "")
+
     def test_hr_estimation_on_synthetic_pulse_like_ir(self):
         df = make_ppg_df(duration_s=30, hr_bpm=72)
 

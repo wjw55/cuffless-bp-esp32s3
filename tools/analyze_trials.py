@@ -50,6 +50,7 @@ SUMMARY_FIELDS = [
     "timing_quality",
     "timing_quality_reason",
     "warnings",
+    "ignored_legacy_warnings",
     "red_min",
     "red_max",
     "red_span",
@@ -398,6 +399,28 @@ def classify_analysis_quality(
     return "usable", f"{timing_quality or 'unknown'} timing and plausible PPG HR"
 
 
+def is_legacy_timestamp_warning(warning: str) -> bool:
+    return "timestamp" in warning.lower()
+
+
+def split_effective_warnings(
+    timing_quality: str | None,
+    metadata_warnings: list[str],
+) -> tuple[list[str], list[str]]:
+    if timing_quality not in {"good", "usable"}:
+        return metadata_warnings, []
+
+    effective_warnings: list[str] = []
+    ignored_legacy_warnings: list[str] = []
+    for warning in metadata_warnings:
+        if is_legacy_timestamp_warning(warning):
+            ignored_legacy_warnings.append(warning)
+        else:
+            effective_warnings.append(warning)
+
+    return effective_warnings, ignored_legacy_warnings
+
+
 def metadata_warnings_to_list(value: Any) -> list[str]:
     if value is None:
         return []
@@ -472,6 +495,7 @@ def build_summary_row(pair: TrialPair) -> dict[str, Any]:
     timing_quality = metadata.get("timing_quality") or inferred_timing_quality
     timing_quality_reason = metadata.get("timing_quality_reason") or inferred_timing_reason
     metadata_warnings = metadata_warnings_to_list(metadata.get("warnings"))
+    effective_warnings, ignored_legacy_warnings = split_effective_warnings(timing_quality, metadata_warnings)
 
     analysis_quality, analysis_reason = classify_analysis_quality(
         timing_quality=timing_quality,
@@ -480,7 +504,7 @@ def build_summary_row(pair: TrialPair) -> dict[str, Any]:
         estimated_ppg_hr_bpm=estimated_hr,
         hr_error_vs_cuff_bpm=hr_error,
         ir_span=ir_span,
-        metadata_warnings=metadata_warnings,
+        metadata_warnings=effective_warnings,
     )
 
     return {
@@ -529,6 +553,7 @@ def build_summary_row(pair: TrialPair) -> dict[str, Any]:
         "timing_quality": timing_quality,
         "timing_quality_reason": timing_quality_reason,
         "warnings": "; ".join(metadata_warnings),
+        "ignored_legacy_warnings": "; ".join(ignored_legacy_warnings),
         "red_min": red_min,
         "red_max": red_max,
         "red_span": red_span,
