@@ -29,6 +29,19 @@ SERIAL_STARTUP_DELAY_S = 1.0
 DEFAULT_ZOOM_START_S = 20.0
 DEFAULT_ZOOM_END_S = 30.0
 DEFAULT_ZOOM_DURATION_S = 10.0
+MAX_FIRMWARE_WARNING_EVENTS = 50
+
+FIRMWARE_STATS_METADATA_KEYS = {
+    "samples": "firmware_status_sample_count",
+    "captured_samples": "firmware_captured_samples",
+    "rate_hz": "firmware_interval_rate_hz",
+    "effective_rate_hz": "firmware_effective_rate_hz",
+    "fifo_avail": "firmware_latest_fifo_available",
+    "ovf": "firmware_fifo_overflow_count",
+    "i2c_errors": "firmware_i2c_error_count",
+    "timestamp_resyncs": "firmware_timestamp_resync_count",
+    "timestamp_corrections": "firmware_timestamp_correction_count",
+}
 
 
 def positive_float(value: str) -> float:
@@ -341,6 +354,83 @@ def parse_ppg_row(line: str) -> tuple[int, int, int, int] | None:
         return None
 
     return sample_seq, timestamp_ms, red, ir
+
+
+def parse_firmware_status_value(value: str):
+    cleaned = value.strip().strip(",")
+
+    if re.fullmatch(r"-?\d+", cleaned):
+        return int(cleaned)
+
+    if re.fullmatch(r"-?\d+\.\d+", cleaned):
+        return float(cleaned)
+
+    return cleaned
+
+
+def parse_firmware_status_line(line: str) -> tuple[str, dict] | None:
+    """Parse comment-prefixed firmware status lines without touching CSV rows."""
+    text = line.strip()
+    if not text.startswith("#"):
+        return None
+
+    body = text[1:].strip()
+    if not body:
+        return None
+
+    normalized = body.replace(",", " ")
+    parts = normalized.split()
+    if not parts:
+        return None
+
+    status_type = parts[0]
+    fields = {}
+    for part in parts[1:]:
+        if "=" not in part:
+            continue
+        key, value = part.split("=", 1)
+        fields[key] = parse_firmware_status_value(value)
+
+    return status_type, fields
+
+
+def create_firmware_diagnostics() -> dict:
+    return {
+        "latest_stats": {},
+        "metadata_fields": {},
+        "warning_events": [],
+    }
+
+
+def update_firmware_diagnostics(diagnostics: dict, parsed_status: tuple[str, dict] | None) -> None:
+    if parsed_status is None:
+        return
+
+    status_type, fields = parsed_status
+    metadata_fields = diagnostics["metadata_fields"]
+
+    if status_type == "stats":
+        diagnostics["latest_stats"] = fields
+        for status_key, metadata_key in FIRMWARE_STATS_METADATA_KEYS.items():
+            if status_key in fields:
+                metadata_fields[metadata_key] = fields[status_key]
+        return
+
+    if status_type != "warning":
+        return
+
+    if len(diagnostics["warning_events"]) < MAX_FIRMWARE_WARNING_EVENTS:
+        diagnostics["warning_events"].append(fields)
+
+    event = fields.get("event")
+    if event == "fifo_overflow" and "total" in fields:
+        metadata_fields["firmware_fifo_overflow_count"] = fields["total"]
+    elif event == "fifo_read_failed" and "i2c_errors" in fields:
+        metadata_fields["firmware_i2c_error_count"] = fields["i2c_errors"]
+    elif event == "timestamp_resync" and "count" in fields:
+        metadata_fields["firmware_timestamp_resync_count"] = fields["count"]
+    elif event == "timestamp_correction" and "count" in fields:
+        metadata_fields["firmware_timestamp_correction_count"] = fields["count"]
 
 
 def classify_timing_quality(
@@ -670,8 +760,15 @@ def build_metadata(
     zoom_start_s: float,
     zoom_end_s: float,
     csv_path: Path | None = None,
+    firmware_diagnostics: dict | None = None,
 ) -> dict:
-    return {
+    firmware_diagnostics = firmware_diagnostics or create_firmware_diagnostics()
+    firmware_metadata = {
+        metadata_key: firmware_diagnostics["metadata_fields"].get(metadata_key)
+        for metadata_key in FIRMWARE_STATS_METADATA_KEYS.values()
+    }
+
+    metadata = {
         "subject_id": args.subject,
         "session_id": args.session,
         "trial_id": args.trial_id,
@@ -719,6 +816,12 @@ def build_metadata(
         "warnings": summary["warnings"],
     }
 
+    metadata.update(firmware_metadata)
+    metadata["firmware_latest_stats"] = firmware_diagnostics["latest_stats"] or None
+    metadata["firmware_warning_events"] = firmware_diagnostics["warning_events"]
+
+    return metadata
+
 
 def main() -> int:
     args = parse_args()
@@ -751,6 +854,7 @@ def main() -> int:
     rows: list[tuple[int, int, int, int]] = []
     ignored_lines = 0
     interrupted = False
+    firmware_diagnostics = create_firmware_diagnostics()
 
     print(f"Opening {args.port} at {args.baud} baud...")
     try:
@@ -769,6 +873,7 @@ def main() -> int:
                     continue
 
                 line = raw_line.decode("utf-8", errors="replace")
+                update_firmware_diagnostics(firmware_diagnostics, parse_firmware_status_line(line))
                 row = parse_ppg_row(line)
                 if row is None:
                     ignored_lines += 1
@@ -811,6 +916,7 @@ def main() -> int:
         zoom_start_s,
         zoom_end_s,
         csv_path,
+        firmware_diagnostics,
     )
     metadata_path.write_text(json.dumps(metadata, indent=2) + "\n", encoding="utf-8")
 

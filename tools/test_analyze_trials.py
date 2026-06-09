@@ -59,6 +59,14 @@ def make_metadata(**overrides):
         "non_increasing_timestamp_count": 0,
         "timing_quality": "usable",
         "timing_quality_reason": "No missing samples or >20 ms gaps.",
+        "firmware_captured_samples": 2000,
+        "firmware_interval_rate_hz": 99.8,
+        "firmware_effective_rate_hz": 99.9,
+        "firmware_latest_fifo_available": 2,
+        "firmware_fifo_overflow_count": 0,
+        "firmware_i2c_error_count": 0,
+        "firmware_timestamp_resync_count": 0,
+        "firmware_timestamp_correction_count": 0,
         "warnings": [],
     }
     metadata.update(overrides)
@@ -111,6 +119,8 @@ class AnalyzeTrialsTests(unittest.TestCase):
             self.assertEqual(row["csv_file"], str(csv_path))
             self.assertEqual(row["metadata_file"], str(metadata_path))
             self.assertGreater(row["ir_span"], 1000)
+            self.assertEqual(row["firmware_fifo_overflow_count"], 0)
+            self.assertEqual(row["firmware_timestamp_resync_count"], 0)
             self.assertEqual(row["analysis_quality"], "usable")
 
     def test_usable_timing_ignores_legacy_timestamp_warning(self):

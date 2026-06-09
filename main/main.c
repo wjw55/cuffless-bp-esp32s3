@@ -18,6 +18,7 @@
 #define ACQUISITION_STATS_PERIOD_MS 5000
 #define SIGNAL_QUALITY_STATUS_PERIOD_MS 1000
 #define SIGNAL_QUALITY_SATURATION_MARGIN 1000
+#define TIMESTAMP_RESYNC_THRESHOLD_US (5 * MAX30102_SAMPLE_PERIOD_US)
 
 static esp_err_t i2c_master_init(void)
 {
@@ -51,8 +52,14 @@ void app_main(void)
     uint64_t sample_seq = 0;
     uint64_t last_stats_sample_seq = 0;
     uint32_t overflow_count_total = 0;
+    uint32_t timestamp_resync_count = 0;
+    uint32_t timestamp_correction_count = 0;
     uint8_t latest_fifo_available = 0;
-    int64_t last_stats_time_ms = esp_timer_get_time() / 1000;
+    bool timestamp_initialized = false;
+    int64_t acquisition_start_time_us = 0;
+    int64_t next_sample_timestamp_us = 0;
+    int64_t last_emitted_timestamp_us = -1;
+    int64_t last_stats_time_us = esp_timer_get_time();
 
 #if DEBUG_SIGNAL_QUALITY
     uint32_t ir_min = MAX30102_ADC_MAX_VALUE;
@@ -63,6 +70,7 @@ void app_main(void)
 
     while (true) {
         uint8_t samples = 0;
+        bool force_timestamp_resync = false;
         esp_err_t samples_result = max30102_get_available_samples(&samples);
         if (samples_result == ESP_OK) {
             latest_fifo_available = samples;
@@ -71,18 +79,64 @@ void app_main(void)
         uint8_t overflow_count = 0;
         if (max30102_read_and_clear_overflow(&overflow_count) == ESP_OK) {
             overflow_count_total += overflow_count;
+            if (overflow_count > 0) {
+                force_timestamp_resync = true;
+                printf("# warning event=fifo_overflow count=%u total=%" PRIu32 "\n",
+                       (unsigned)overflow_count,
+                       overflow_count_total);
+            }
         }
 
-        int64_t latest_sample_time_ms = esp_timer_get_time() / 1000;
-        int64_t first_sample_time_ms =
-            latest_sample_time_ms - ((int64_t)(samples > 0 ? samples - 1 : 0) * MAX30102_SAMPLE_PERIOD_MS);
-        uint8_t sample_index = 0;
+        if (samples > 0 && timestamp_initialized) {
+            int64_t read_time_us = esp_timer_get_time();
+            int64_t expected_latest_timestamp_us =
+                next_sample_timestamp_us + ((int64_t)(samples - 1) * MAX30102_SAMPLE_PERIOD_US);
+            int64_t lag_us = read_time_us - expected_latest_timestamp_us;
+
+            if (force_timestamp_resync || lag_us > TIMESTAMP_RESYNC_THRESHOLD_US) {
+                const char *resync_reason = force_timestamp_resync ? "fifo_overflow" : "lag";
+                int64_t corrected_next_timestamp_us =
+                    read_time_us - ((int64_t)(samples - 1) * MAX30102_SAMPLE_PERIOD_US);
+
+                if (last_emitted_timestamp_us >= 0) {
+                    int64_t minimum_next_timestamp_us =
+                        last_emitted_timestamp_us + MAX30102_SAMPLE_PERIOD_US;
+                    if (corrected_next_timestamp_us < minimum_next_timestamp_us) {
+                        corrected_next_timestamp_us = minimum_next_timestamp_us;
+                    }
+                }
+
+                printf("# warning event=timestamp_resync sample_seq=%" PRIu64
+                       " reason=%s lag_us=%" PRId64 " old_next_us=%" PRId64
+                       " new_next_us=%" PRId64 " count=%" PRIu32 "\n",
+                       sample_seq,
+                       resync_reason,
+                       lag_us,
+                       next_sample_timestamp_us,
+                       corrected_next_timestamp_us,
+                       timestamp_resync_count + 1);
+
+                next_sample_timestamp_us = corrected_next_timestamp_us;
+                timestamp_resync_count++;
+            }
+        }
 
         while (samples > 0) {
             uint32_t red = 0;
             uint32_t ir = 0;
 
             if (max30102_read_fifo_sample(&red, &ir) == ESP_OK) {
+                if (!timestamp_initialized) {
+                    next_sample_timestamp_us = esp_timer_get_time();
+                    acquisition_start_time_us = next_sample_timestamp_us;
+                    last_stats_time_us = acquisition_start_time_us;
+                    timestamp_initialized = true;
+                    printf("# timestamp_sync event=initial sample_seq=%" PRIu64
+                           " timestamp_us=%" PRId64 "\n",
+                           sample_seq,
+                           next_sample_timestamp_us);
+                }
+
                 // Finger detection: keep CSV clean; IR consistently below this threshold means no finger/poor contact.
                 bool finger_present = (ir > MAX30102_FINGER_IR_THRESHOLD);
                 (void)finger_present;
@@ -97,10 +151,23 @@ void app_main(void)
                 quality_sample_count++;
 #endif
 
-                // Sampling rate: estimate per-sample timestamps at 100 Hz when draining FIFO batches.
-                int64_t timestamp_ms =
-                    first_sample_time_ms + ((int64_t)sample_index * MAX30102_SAMPLE_PERIOD_MS);
+                int64_t timestamp_us = next_sample_timestamp_us;
+                if (last_emitted_timestamp_us >= 0 &&
+                    timestamp_us < (last_emitted_timestamp_us + MAX30102_SAMPLE_PERIOD_US)) {
+                    timestamp_us = last_emitted_timestamp_us + MAX30102_SAMPLE_PERIOD_US;
+                    next_sample_timestamp_us = timestamp_us;
+                    timestamp_correction_count++;
+                    printf("# warning event=timestamp_correction sample_seq=%" PRIu64
+                           " corrected_timestamp_us=%" PRId64 " count=%" PRIu32 "\n",
+                           sample_seq,
+                           timestamp_us,
+                           timestamp_correction_count);
+                }
+
+                int64_t timestamp_ms = timestamp_us / 1000;
                 printf("%" PRIu64 ",%" PRId64 ",%" PRIu32 ",%" PRIu32 "\n", sample_seq, timestamp_ms, red, ir);
+                last_emitted_timestamp_us = timestamp_us;
+                next_sample_timestamp_us = timestamp_us + MAX30102_SAMPLE_PERIOD_US;
                 sample_seq++;
             } else {
                 printf("# warning event=fifo_read_failed i2c_errors=%" PRIu32 "\n",
@@ -109,7 +176,6 @@ void app_main(void)
             }
 
             samples--;
-            sample_index++;
         }
 
 #if DEBUG_SIGNAL_QUALITY
@@ -138,24 +204,37 @@ void app_main(void)
         }
 #endif
 
-        int64_t stats_now_ms = esp_timer_get_time() / 1000;
-        if (stats_now_ms - last_stats_time_ms >= ACQUISITION_STATS_PERIOD_MS) {
-            int64_t elapsed_ms = stats_now_ms - last_stats_time_ms;
+        int64_t stats_now_us = esp_timer_get_time();
+        if ((stats_now_us - last_stats_time_us) >= (ACQUISITION_STATS_PERIOD_MS * 1000)) {
+            int64_t elapsed_us = stats_now_us - last_stats_time_us;
             uint64_t samples_since_last_status = sample_seq - last_stats_sample_seq;
             uint64_t rate_tenths_hz =
-                (elapsed_ms > 0) ? ((samples_since_last_status * 10000ULL) / (uint64_t)elapsed_ms) : 0;
+                (elapsed_us > 0) ? ((samples_since_last_status * 10000000ULL) / (uint64_t)elapsed_us) : 0;
+            int64_t total_elapsed_us = stats_now_us - acquisition_start_time_us;
+            uint64_t effective_rate_tenths_hz =
+                (timestamp_initialized && total_elapsed_us > 0)
+                    ? ((sample_seq * 10000000ULL) / (uint64_t)total_elapsed_us)
+                    : 0;
 
-            printf("# stats samples=%" PRIu64 " rate_hz=%" PRIu64 ".%" PRIu64
-                   " fifo_avail=%u ovf=%" PRIu32 " i2c_errors=%" PRIu32 "\n",
+            printf("# stats samples=%" PRIu64 " captured_samples=%" PRIu64
+                   " rate_hz=%" PRIu64 ".%" PRIu64
+                   " effective_rate_hz=%" PRIu64 ".%" PRIu64
+                   " fifo_avail=%u ovf=%" PRIu32 " i2c_errors=%" PRIu32
+                   " timestamp_resyncs=%" PRIu32 " timestamp_corrections=%" PRIu32 "\n",
+                   sample_seq,
                    sample_seq,
                    rate_tenths_hz / 10,
                    rate_tenths_hz % 10,
+                   effective_rate_tenths_hz / 10,
+                   effective_rate_tenths_hz % 10,
                    (unsigned)latest_fifo_available,
                    overflow_count_total,
-                   max30102_get_i2c_error_count());
+                   max30102_get_i2c_error_count(),
+                   timestamp_resync_count,
+                   timestamp_correction_count);
 
             last_stats_sample_seq = sample_seq;
-            last_stats_time_ms = stats_now_ms;
+            last_stats_time_us = stats_now_us;
         }
 
         // FIFO reads: poll faster than the 32-sample FIFO fills at 100 Hz to avoid dropped samples.

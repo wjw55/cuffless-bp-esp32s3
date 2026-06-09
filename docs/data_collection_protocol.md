@@ -105,6 +105,14 @@ Timing diagnostics:
 - `non_increasing_timestamp_count`
 - `timing_quality`
 - `timing_quality_reason`
+- `firmware_captured_samples`
+- `firmware_interval_rate_hz`
+- `firmware_effective_rate_hz`
+- `firmware_latest_fifo_available`
+- `firmware_fifo_overflow_count`
+- `firmware_i2c_error_count`
+- `firmware_timestamp_resync_count`
+- `firmware_timestamp_correction_count`
 - `warnings`
 
 Optional Omron fields:

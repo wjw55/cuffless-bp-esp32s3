@@ -15,10 +15,13 @@ from collect_ppg import (
     apply_prompt_bp_after,
     build_metadata,
     build_output_paths,
+    create_firmware_diagnostics,
     ensure_output_paths_available,
     parse_args,
+    parse_firmware_status_line,
     parse_ppg_row,
     summarize,
+    update_firmware_diagnostics,
     validate_collection_args,
 )
 
@@ -29,6 +32,45 @@ class ParsePpgRowTests(unittest.TestCase):
 
     def test_ignores_new_csv_header(self):
         self.assertIsNone(parse_ppg_row("sample_seq,timestamp_ms,red,ir"))
+
+
+class FirmwareStatusParsingTests(unittest.TestCase):
+    def test_parses_firmware_stats_line(self):
+        parsed = parse_firmware_status_line(
+            "# stats samples=500 captured_samples=500 rate_hz=99.8 "
+            "effective_rate_hz=99.9 fifo_avail=2 ovf=0 i2c_errors=0 "
+            "timestamp_resyncs=0 timestamp_corrections=0"
+        )
+
+        self.assertIsNotNone(parsed)
+        status_type, fields = parsed
+        self.assertEqual(status_type, "stats")
+        self.assertEqual(fields["captured_samples"], 500)
+        self.assertEqual(fields["rate_hz"], 99.8)
+        self.assertEqual(fields["effective_rate_hz"], 99.9)
+        self.assertEqual(fields["timestamp_resyncs"], 0)
+
+    def test_updates_firmware_diagnostics_from_stats_and_warnings(self):
+        diagnostics = create_firmware_diagnostics()
+
+        update_firmware_diagnostics(
+            diagnostics,
+            parse_firmware_status_line(
+                "# stats samples=500 captured_samples=500 rate_hz=99.8 "
+                "effective_rate_hz=99.9 fifo_avail=2 ovf=0 i2c_errors=0 "
+                "timestamp_resyncs=0 timestamp_corrections=0"
+            ),
+        )
+        update_firmware_diagnostics(
+            diagnostics,
+            parse_firmware_status_line("# warning event=timestamp_resync sample_seq=1200 lag_us=81000 count=1"),
+        )
+
+        self.assertEqual(diagnostics["metadata_fields"]["firmware_captured_samples"], 500)
+        self.assertEqual(diagnostics["metadata_fields"]["firmware_effective_rate_hz"], 99.9)
+        self.assertEqual(diagnostics["metadata_fields"]["firmware_fifo_overflow_count"], 0)
+        self.assertEqual(diagnostics["metadata_fields"]["firmware_timestamp_resync_count"], 1)
+        self.assertEqual(len(diagnostics["warning_events"]), 1)
 
 
 def make_args(**overrides):
@@ -162,6 +204,36 @@ class MetadataTests(unittest.TestCase):
             metadata["timing_quality_reason"],
             "No missing samples, monotonic timestamps, and all intervals <= 15 ms.",
         )
+
+    def test_metadata_includes_firmware_diagnostics_when_available(self):
+        diagnostics = create_firmware_diagnostics()
+        update_firmware_diagnostics(
+            diagnostics,
+            parse_firmware_status_line(
+                "# stats samples=500 captured_samples=500 rate_hz=99.8 "
+                "effective_rate_hz=99.9 fifo_avail=2 ovf=0 i2c_errors=0 "
+                "timestamp_resyncs=0 timestamp_corrections=0"
+            ),
+        )
+
+        metadata = build_metadata(
+            make_args(),
+            make_summary(),
+            datetime(2026, 6, 7, 20, 0, tzinfo=timezone.utc),
+            interrupted=False,
+            ignored_lines=0,
+            zoom_start_s=20.0,
+            zoom_end_s=30.0,
+            firmware_diagnostics=diagnostics,
+        )
+
+        self.assertEqual(metadata["firmware_captured_samples"], 500)
+        self.assertEqual(metadata["firmware_interval_rate_hz"], 99.8)
+        self.assertEqual(metadata["firmware_effective_rate_hz"], 99.9)
+        self.assertEqual(metadata["firmware_fifo_overflow_count"], 0)
+        self.assertEqual(metadata["firmware_i2c_error_count"], 0)
+        self.assertEqual(metadata["firmware_timestamp_resync_count"], 0)
+        self.assertEqual(metadata["firmware_latest_stats"]["captured_samples"], 500)
 
     def test_builds_omron_labeled_metadata_with_bp_fields(self):
         metadata = build_metadata(
@@ -384,6 +456,15 @@ class OutputPathTests(unittest.TestCase):
 
 
 class TimestampDiagnosticsTests(unittest.TestCase):
+    def test_nominal_timestamp_cursor_output_is_monotonic_and_good(self):
+        timestamps = [1234 + (index * 10) for index in range(100)]
+        summary = summarize(make_ppg_df(timestamps), requested_duration_s=0.99)
+
+        self.assertEqual(summary["non_increasing_timestamp_count"], 0)
+        self.assertEqual(summary["min_sample_interval_ms"], 10.0)
+        self.assertEqual(summary["max_sample_interval_ms"], 10.0)
+        self.assertEqual(summary["timing_quality"], "good")
+
     def test_regular_10ms_timestamps_have_clean_diagnostics(self):
         summary = summarize(make_ppg_df([0, 10, 20, 30, 40, 50]), requested_duration_s=0.05)
 

@@ -51,7 +51,7 @@ The firmware prints CSV samples and comment-prefixed status lines. Press `Ctrl+]
 sample_seq,timestamp_ms,red,ir
 0,12345,48231,53120
 1,12355,48244,53145
-# stats samples=500 rate_hz=99.8 fifo_avail=2 ovf=0 i2c_errors=0
+# stats samples=500 captured_samples=500 rate_hz=99.8 effective_rate_hz=99.9 fifo_avail=2 ovf=0 i2c_errors=0 timestamp_resyncs=0 timestamp_corrections=0
 ```
 
 Only rows without a leading `#` are data samples. Lines beginning with `#` are status/debug comments and are safe for the Python collector to ignore.
@@ -90,7 +90,7 @@ sample_seq,timestamp_ms,red,ir
 ```
 
 - `sample_seq`: monotonically increasing firmware sample counter.
-- `timestamp_ms`: ESP timer timestamp in milliseconds, estimated at 100 Hz when draining FIFO batches.
+- `timestamp_ms`: ESP timer timestamp in milliseconds. The first captured sample initializes the firmware timestamp cursor, then each emitted sample advances by the nominal 10 ms period.
 - `red`: raw MAX30102 red channel ADC value.
 - `ir`: raw MAX30102 IR channel ADC value.
 
