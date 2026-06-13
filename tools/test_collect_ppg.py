@@ -58,19 +58,24 @@ class FirmwareStatusParsingTests(unittest.TestCase):
             parse_firmware_status_line(
                 "# stats samples=500 captured_samples=500 rate_hz=99.8 "
                 "effective_rate_hz=99.9 fifo_avail=2 ovf=0 i2c_errors=0 "
-                "timestamp_resyncs=0 timestamp_corrections=0"
+                "timestamp_resyncs=0 timestamp_corrections=0 overflow_recoveries=0"
             ),
         )
         update_firmware_diagnostics(
             diagnostics,
             parse_firmware_status_line("# warning event=timestamp_resync sample_seq=1200 lag_us=81000 count=1"),
         )
+        update_firmware_diagnostics(
+            diagnostics,
+            parse_firmware_status_line("# warning event=fifo_overflow_recovery count=1 total=1 sample_seq=1200"),
+        )
 
         self.assertEqual(diagnostics["metadata_fields"]["firmware_captured_samples"], 500)
         self.assertEqual(diagnostics["metadata_fields"]["firmware_effective_rate_hz"], 99.9)
         self.assertEqual(diagnostics["metadata_fields"]["firmware_fifo_overflow_count"], 0)
         self.assertEqual(diagnostics["metadata_fields"]["firmware_timestamp_resync_count"], 1)
-        self.assertEqual(len(diagnostics["warning_events"]), 1)
+        self.assertEqual(diagnostics["metadata_fields"]["firmware_fifo_overflow_recovery_count"], 1)
+        self.assertEqual(len(diagnostics["warning_events"]), 2)
 
 
 def make_args(**overrides):
@@ -212,7 +217,7 @@ class MetadataTests(unittest.TestCase):
             parse_firmware_status_line(
                 "# stats samples=500 captured_samples=500 rate_hz=99.8 "
                 "effective_rate_hz=99.9 fifo_avail=2 ovf=0 i2c_errors=0 "
-                "timestamp_resyncs=0 timestamp_corrections=0"
+                "timestamp_resyncs=0 timestamp_corrections=0 overflow_recoveries=0"
             ),
         )
 
@@ -233,6 +238,7 @@ class MetadataTests(unittest.TestCase):
         self.assertEqual(metadata["firmware_fifo_overflow_count"], 0)
         self.assertEqual(metadata["firmware_i2c_error_count"], 0)
         self.assertEqual(metadata["firmware_timestamp_resync_count"], 0)
+        self.assertEqual(metadata["firmware_fifo_overflow_recovery_count"], 0)
         self.assertEqual(metadata["firmware_latest_stats"]["captured_samples"], 500)
 
     def test_builds_omron_labeled_metadata_with_bp_fields(self):

@@ -20,12 +20,14 @@
 #define MAX30102_REG_SPO2_CONFIG 0x0A
 #define MAX30102_REG_LED1_PA 0x0C
 #define MAX30102_REG_LED2_PA 0x0D
+#define MAX30102_REG_PART_ID 0xFF
 
 #define MAX30102_MODE_RESET 0x40
 #define MAX30102_MODE_SPO2 0x03
 #define MAX30102_FIFO_AVERAGE_1 0x00
 #define MAX30102_SPO2_CONFIG_100HZ_18BIT 0x27
 #define MAX30102_LED_CURRENT_7_2MA 0x24
+#define MAX30102_EXPECTED_PART_ID 0x15
 
 static const char *TAG = "max30102";
 static uint32_t i2c_error_count = 0;
@@ -91,15 +93,40 @@ bool max30102_is_connected(void)
     return true;
 }
 
+static esp_err_t max30102_verify_part_id(void)
+{
+    uint8_t part_id = 0;
+    ESP_RETURN_ON_ERROR(max30102_read_register(MAX30102_REG_PART_ID, &part_id), TAG, "Part ID read failed");
+
+    if (part_id != MAX30102_EXPECTED_PART_ID) {
+        ESP_LOGE(TAG,
+                 "Unexpected MAX30102 part ID: 0x%02X (expected 0x%02X)",
+                 part_id,
+                 MAX30102_EXPECTED_PART_ID);
+        return ESP_ERR_NOT_FOUND;
+    }
+
+    ESP_LOGI(TAG, "MAX30102 part ID verified: 0x%02X", part_id);
+    return ESP_OK;
+}
+
+esp_err_t max30102_reset_fifo(void)
+{
+    ESP_RETURN_ON_ERROR(max30102_write_register(MAX30102_REG_FIFO_WR_PTR, 0x00), TAG, "Clear FIFO write pointer failed");
+    ESP_RETURN_ON_ERROR(max30102_write_register(MAX30102_REG_OVF_COUNTER, 0x00), TAG, "Clear FIFO overflow counter failed");
+    ESP_RETURN_ON_ERROR(max30102_write_register(MAX30102_REG_FIFO_RD_PTR, 0x00), TAG, "Clear FIFO read pointer failed");
+
+    return ESP_OK;
+}
+
 esp_err_t max30102_init(void)
 {
     ESP_RETURN_ON_ERROR(max30102_write_register(MAX30102_REG_MODE_CONFIG, MAX30102_MODE_RESET), TAG, "Reset failed");
     vTaskDelay(pdMS_TO_TICKS(100));
+    ESP_RETURN_ON_ERROR(max30102_verify_part_id(), TAG, "Part ID verification failed");
 
     // Start from an empty FIFO before streaming samples.
-    ESP_RETURN_ON_ERROR(max30102_write_register(MAX30102_REG_FIFO_WR_PTR, 0x00), TAG, "Clear FIFO write pointer failed");
-    ESP_RETURN_ON_ERROR(max30102_write_register(MAX30102_REG_OVF_COUNTER, 0x00), TAG, "Clear FIFO overflow counter failed");
-    ESP_RETURN_ON_ERROR(max30102_write_register(MAX30102_REG_FIFO_RD_PTR, 0x00), TAG, "Clear FIFO read pointer failed");
+    ESP_RETURN_ON_ERROR(max30102_reset_fifo(), TAG, "FIFO reset failed");
 
     // FIFO reads: disable sample averaging so each FIFO entry is a raw red/IR sample pair.
     ESP_RETURN_ON_ERROR(max30102_write_register(MAX30102_REG_FIFO_CONFIG, MAX30102_FIFO_AVERAGE_1), TAG, "FIFO config failed");
@@ -143,7 +170,7 @@ esp_err_t max30102_get_available_samples(uint8_t *samples)
     return ESP_OK;
 }
 
-esp_err_t max30102_read_and_clear_overflow(uint8_t *overflow_count)
+esp_err_t max30102_read_overflow_count(uint8_t *overflow_count)
 {
     uint8_t value = 0;
     esp_err_t result = max30102_read_register(MAX30102_REG_OVF_COUNTER, &value);
@@ -153,11 +180,6 @@ esp_err_t max30102_read_and_clear_overflow(uint8_t *overflow_count)
     }
 
     *overflow_count = value & 0x1F;
-
-    if (*overflow_count > 0) {
-        return max30102_write_register(MAX30102_REG_OVF_COUNTER, 0x00);
-    }
-
     return ESP_OK;
 }
 

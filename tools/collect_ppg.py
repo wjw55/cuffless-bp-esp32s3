@@ -41,6 +41,7 @@ FIRMWARE_STATS_METADATA_KEYS = {
     "i2c_errors": "firmware_i2c_error_count",
     "timestamp_resyncs": "firmware_timestamp_resync_count",
     "timestamp_corrections": "firmware_timestamp_correction_count",
+    "overflow_recoveries": "firmware_fifo_overflow_recovery_count",
 }
 
 
@@ -427,6 +428,8 @@ def update_firmware_diagnostics(diagnostics: dict, parsed_status: tuple[str, dic
         metadata_fields["firmware_fifo_overflow_count"] = fields["total"]
     elif event == "fifo_read_failed" and "i2c_errors" in fields:
         metadata_fields["firmware_i2c_error_count"] = fields["i2c_errors"]
+    elif event == "fifo_overflow_recovery" and "total" in fields:
+        metadata_fields["firmware_fifo_overflow_recovery_count"] = fields["total"]
     elif event == "timestamp_resync" and "count" in fields:
         metadata_fields["firmware_timestamp_resync_count"] = fields["count"]
     elif event == "timestamp_correction" and "count" in fields:

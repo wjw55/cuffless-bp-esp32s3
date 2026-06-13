@@ -110,6 +110,7 @@ Timing diagnostics:
 - `firmware_effective_rate_hz`
 - `firmware_latest_fifo_available`
 - `firmware_fifo_overflow_count`
+- `firmware_fifo_overflow_recovery_count`
 - `firmware_i2c_error_count`
 - `firmware_timestamp_resync_count`
 - `firmware_timestamp_correction_count`

@@ -51,7 +51,7 @@ The firmware prints CSV samples and comment-prefixed status lines. Press `Ctrl+]
 sample_seq,timestamp_ms,red,ir
 0,12345,48231,53120
 1,12355,48244,53145
-# stats samples=500 captured_samples=500 rate_hz=99.8 effective_rate_hz=99.9 fifo_avail=2 ovf=0 i2c_errors=0 timestamp_resyncs=0 timestamp_corrections=0
+# stats samples=500 captured_samples=500 rate_hz=99.8 effective_rate_hz=99.9 fifo_avail=2 ovf=0 i2c_errors=0 timestamp_resyncs=0 timestamp_corrections=0 overflow_recoveries=0
 ```
 
 Only rows without a leading `#` are data samples. Lines beginning with `#` are status/debug comments and are safe for the Python collector to ignore.
