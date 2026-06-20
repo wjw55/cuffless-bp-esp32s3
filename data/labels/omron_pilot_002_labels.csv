@@ -1,0 +1,6 @@
+session,trial_id,subject,ppg_csv,metadata_json,posture,ppg_location,ppg_hand,cuff_arm,sbp,dbp,omron_hr,omron_timing,timing_quality,quality,notes
+omron_pilot_002,trial_001,self,data/raw/self_omron_pilot_002_trial_001_ppg.csv,data/raw/self_omron_pilot_002_trial_001_metadata.json,seated,right_index_finger,right,left,108,61,69,unknown,good,good,Omron labelled finger PPG trial
+omron_pilot_002,trial_002,self,data/raw/self_omron_pilot_002_trial_002_ppg.csv,data/raw/self_omron_pilot_002_trial_002_metadata.json,seated,right_index_finger,right,left,107,64,68,during_ppg,good,good,Omron labelled finger PPG trial
+omron_pilot_002,trial_003,self,data/raw/self_omron_pilot_002_trial_003_ppg.csv,data/raw/self_omron_pilot_002_trial_003_metadata.json,seated,right_index_finger,right,left,107,66,74,during_ppg,good,good,Omron labelled finger PPG trial
+omron_pilot_002,trial_004,self,data/raw/self_omron_pilot_002_trial_004_ppg.csv,data/raw/self_omron_pilot_002_trial_004_metadata.json,seated,right_index_finger,right,left,98,61,69,during_ppg,good,good,Omron labelled finger PPG trial
+omron_pilot_002,trial_005,self,data/raw/self_omron_pilot_002_trial_005_ppg.csv,data/raw/self_omron_pilot_002_trial_005_metadata.json,seated,right_index_finger,right,left,101,62,69,during_ppg,good,good,Omron labelled finger PPG trial
