@@ -41,6 +41,7 @@ FIRMWARE_STATS_METADATA_KEYS = {
     "i2c_errors": "firmware_i2c_error_count",
     "timestamp_resyncs": "firmware_timestamp_resync_count",
     "timestamp_corrections": "firmware_timestamp_correction_count",
+    "timestamp_lag_warnings": "firmware_timestamp_lag_warning_count",
     "overflow_recoveries": "firmware_fifo_overflow_recovery_count",
 }
 
@@ -434,6 +435,8 @@ def update_firmware_diagnostics(diagnostics: dict, parsed_status: tuple[str, dic
         metadata_fields["firmware_timestamp_resync_count"] = fields["count"]
     elif event == "timestamp_correction" and "count" in fields:
         metadata_fields["firmware_timestamp_correction_count"] = fields["count"]
+    elif event == "timestamp_lag" and "count" in fields:
+        metadata_fields["firmware_timestamp_lag_warning_count"] = fields["count"]
 
 
 def classify_timing_quality(

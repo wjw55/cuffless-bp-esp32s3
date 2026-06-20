@@ -18,7 +18,7 @@
 #define ACQUISITION_STATS_PERIOD_MS 5000
 #define SIGNAL_QUALITY_STATUS_PERIOD_MS 1000
 #define SIGNAL_QUALITY_SATURATION_MARGIN 1000
-#define TIMESTAMP_RESYNC_THRESHOLD_US (5 * MAX30102_SAMPLE_PERIOD_US)
+#define TIMESTAMP_LAG_WARNING_STEP_US (5 * MAX30102_SAMPLE_PERIOD_US)
 #define I2C_WARNING_THROTTLE_MS 1000
 
 static esp_err_t i2c_master_init(void)
@@ -74,6 +74,7 @@ void app_main(void)
     uint32_t overflow_recovery_count = 0;
     uint32_t timestamp_resync_count = 0;
     uint32_t timestamp_correction_count = 0;
+    uint32_t timestamp_lag_warning_count = 0;
     uint8_t latest_fifo_available = 0;
     bool timestamp_initialized = false;
     int64_t acquisition_start_time_us = 0;
@@ -82,6 +83,7 @@ void app_main(void)
     int64_t last_stats_time_us = esp_timer_get_time();
     int64_t last_fifo_pointer_warning_time_us = 0;
     int64_t last_overflow_counter_warning_time_us = 0;
+    int64_t next_timestamp_lag_warning_us = TIMESTAMP_LAG_WARNING_STEP_US;
 
 #if DEBUG_SIGNAL_QUALITY
     uint32_t ir_min = MAX30102_ADC_MAX_VALUE;
@@ -101,6 +103,7 @@ void app_main(void)
                 skip_fifo_drain = true;
                 timestamp_initialized = false;
                 latest_fifo_available = 0;
+                next_timestamp_lag_warning_us = TIMESTAMP_LAG_WARNING_STEP_US;
 
                 esp_err_t reset_result = max30102_reset_fifo();
                 if (reset_result == ESP_OK) {
@@ -156,30 +159,22 @@ void app_main(void)
                 next_sample_timestamp_us + ((int64_t)(samples - 1) * MAX30102_SAMPLE_PERIOD_US);
             int64_t lag_us = read_time_us - expected_latest_timestamp_us;
 
-            if (lag_us > TIMESTAMP_RESYNC_THRESHOLD_US) {
-                int64_t corrected_next_timestamp_us =
-                    read_time_us - ((int64_t)(samples - 1) * MAX30102_SAMPLE_PERIOD_US);
-
-                if (last_emitted_timestamp_us >= 0) {
-                    int64_t minimum_next_timestamp_us =
-                        last_emitted_timestamp_us + MAX30102_SAMPLE_PERIOD_US;
-                    if (corrected_next_timestamp_us < minimum_next_timestamp_us) {
-                        corrected_next_timestamp_us = minimum_next_timestamp_us;
-                    }
-                }
-
-                printf("# warning event=timestamp_resync sample_seq=%" PRIu64
-                       " reason=%s lag_us=%" PRId64 " old_next_us=%" PRId64
-                       " new_next_us=%" PRId64 " count=%" PRIu32 "\n",
+            if (lag_us > next_timestamp_lag_warning_us) {
+                timestamp_lag_warning_count++;
+                printf("# warning event=timestamp_lag sample_seq=%" PRIu64
+                       " lag_us=%" PRId64 " expected_latest_us=%" PRId64
+                       " read_time_us=%" PRId64 " next_sample_us=%" PRId64
+                       " count=%" PRIu32 "\n",
                        sample_seq,
-                       "lag",
                        lag_us,
+                       expected_latest_timestamp_us,
+                       read_time_us,
                        next_sample_timestamp_us,
-                       corrected_next_timestamp_us,
-                       timestamp_resync_count + 1);
+                       timestamp_lag_warning_count);
 
-                next_sample_timestamp_us = corrected_next_timestamp_us;
-                timestamp_resync_count++;
+                while (next_timestamp_lag_warning_us <= lag_us) {
+                    next_timestamp_lag_warning_us += TIMESTAMP_LAG_WARNING_STEP_US;
+                }
             }
         }
 
@@ -195,6 +190,7 @@ void app_main(void)
                         last_stats_time_us = acquisition_start_time_us;
                     }
                     timestamp_initialized = true;
+                    next_timestamp_lag_warning_us = TIMESTAMP_LAG_WARNING_STEP_US;
                     printf("# timestamp_sync event=%s sample_seq=%" PRIu64
                            " timestamp_us=%" PRId64 "\n",
                            (sample_seq == 0) ? "initial" : "resync_after_overflow",
@@ -286,6 +282,7 @@ void app_main(void)
                    " effective_rate_hz=%" PRIu64 ".%" PRIu64
                    " fifo_avail=%u ovf=%" PRIu32 " i2c_errors=%" PRIu32
                    " timestamp_resyncs=%" PRIu32 " timestamp_corrections=%" PRIu32
+                   " timestamp_lag_warnings=%" PRIu32
                    " overflow_recoveries=%" PRIu32 "\n",
                    sample_seq,
                    sample_seq,
@@ -298,6 +295,7 @@ void app_main(void)
                    max30102_get_i2c_error_count(),
                    timestamp_resync_count,
                    timestamp_correction_count,
+                   timestamp_lag_warning_count,
                    overflow_recovery_count);
 
             last_stats_sample_seq = sample_seq;

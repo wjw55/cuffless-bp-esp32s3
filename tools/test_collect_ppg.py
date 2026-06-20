@@ -77,6 +77,27 @@ class FirmwareStatusParsingTests(unittest.TestCase):
         self.assertEqual(diagnostics["metadata_fields"]["firmware_fifo_overflow_recovery_count"], 1)
         self.assertEqual(len(diagnostics["warning_events"]), 2)
 
+    def test_tracks_timestamp_lag_warnings_separately_from_resyncs(self):
+        diagnostics = create_firmware_diagnostics()
+
+        update_firmware_diagnostics(
+            diagnostics,
+            parse_firmware_status_line(
+                "# stats samples=500 captured_samples=500 rate_hz=99.8 "
+                "effective_rate_hz=99.9 fifo_avail=2 ovf=0 i2c_errors=0 "
+                "timestamp_resyncs=1 timestamp_corrections=0 "
+                "timestamp_lag_warnings=2 overflow_recoveries=1"
+            ),
+        )
+        update_firmware_diagnostics(
+            diagnostics,
+            parse_firmware_status_line("# warning event=timestamp_lag sample_seq=1200 lag_us=60000 count=3"),
+        )
+
+        self.assertEqual(diagnostics["metadata_fields"]["firmware_timestamp_resync_count"], 1)
+        self.assertEqual(diagnostics["metadata_fields"]["firmware_timestamp_lag_warning_count"], 3)
+        self.assertEqual(diagnostics["warning_events"][0]["event"], "timestamp_lag")
+
 
 def make_args(**overrides):
     defaults = {
