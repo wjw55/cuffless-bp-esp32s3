@@ -13,6 +13,7 @@ This script saves one recording session as:
 from __future__ import annotations
 
 import argparse
+import csv
 import json
 import re
 import subprocess
@@ -44,6 +45,27 @@ FIRMWARE_STATS_METADATA_KEYS = {
     "timestamp_lag_warnings": "firmware_timestamp_lag_warning_count",
     "overflow_recoveries": "firmware_fifo_overflow_recovery_count",
 }
+
+LABEL_COLUMNS = [
+    "session",
+    "trial_id",
+    "subject",
+    "ppg_csv",
+    "metadata_json",
+    "posture",
+    "ppg_location",
+    "ppg_hand",
+    "cuff_arm",
+    "sbp",
+    "dbp",
+    "omron_hr",
+    "omron_timing",
+    "timing_quality",
+    "quality",
+    "notes",
+]
+
+OMRON_TIMING_CHOICES = ("before_ppg", "during_ppg", "after_ppg", "unknown")
 
 
 def positive_float(value: str) -> float:
@@ -129,9 +151,26 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Prompt for Omron BP values after recording finishes and before metadata is saved",
     )
     parser.add_argument("--outdir", default="data/raw", help="Output folder, default data/raw")
+    parser.add_argument("--labels-dir", default="data/labels", help="Label CSV folder, default data/labels")
     parser.add_argument("--overwrite", action="store_true", help="Allow replacing existing output files")
     parser.add_argument("--plot-start", type=nonnegative_float, help="Zoom plot start time in seconds")
     parser.add_argument("--plot-end", type=nonnegative_float, help="Zoom plot end time in seconds")
+    parser.add_argument(
+        "--prompt-labels",
+        action="store_true",
+        help="Prompt for Omron labels after recording and append them to data/labels/<session>_labels.csv",
+    )
+    parser.add_argument("--sbp", dest="label_sbp", type=positive_int, help="Optional Omron systolic BP label")
+    parser.add_argument("--dbp", dest="label_dbp", type=positive_int, help="Optional Omron diastolic BP label")
+    parser.add_argument("--omron-hr", dest="label_omron_hr", type=positive_int, help="Optional Omron HR label")
+    parser.add_argument(
+        "--omron-timing",
+        dest="label_omron_timing",
+        choices=OMRON_TIMING_CHOICES,
+        default="",
+        help="When the Omron label was taken relative to PPG",
+    )
+    parser.add_argument("--label-notes", default="", help="Optional notes saved only in the labels CSV")
     args = parser.parse_args(argv)
     return validate_collection_args(args, parser)
 
@@ -250,6 +289,79 @@ def apply_prompt_bp_after(args: argparse.Namespace, input_func=input, output_fun
     return args
 
 
+def prompt_optional_choice(
+    label: str,
+    current_value: str,
+    choices: tuple[str, ...],
+    input_func=input,
+    output_func=print,
+) -> str:
+    choices_text = "/".join(choices)
+    while True:
+        raw_value = input_func(f"{label} ({choices_text}){optional_prompt_suffix(current_value)}: ").strip()
+        if raw_value == "":
+            return current_value
+        if raw_value in choices:
+            return raw_value
+        output_func(f"Invalid {label}: choose one of {choices_text}")
+
+
+def label_inputs_present(args: argparse.Namespace) -> bool:
+    return any(
+        [
+            getattr(args, "label_sbp", None) is not None,
+            getattr(args, "label_dbp", None) is not None,
+            getattr(args, "label_omron_hr", None) is not None,
+            bool(getattr(args, "label_omron_timing", "")),
+            bool(getattr(args, "label_notes", "")),
+        ]
+    )
+
+
+def apply_prompt_labels(args: argparse.Namespace, input_func=input, output_func=print) -> bool:
+    has_existing_label_values = label_inputs_present(args)
+    output_func("\nEnter Omron label values. Leave SBP blank to skip label entry.")
+
+    while True:
+        raw_sbp = input_func(f"Omron SBP mmHg{optional_prompt_suffix(args.label_sbp)}: ").strip()
+        if raw_sbp == "":
+            if not has_existing_label_values:
+                output_func("Label entry skipped.")
+                return False
+            break
+
+        try:
+            args.label_sbp = positive_int(raw_sbp)
+            break
+        except argparse.ArgumentTypeError as exc:
+            output_func(f"Invalid Omron SBP mmHg: {exc}")
+
+    args.label_dbp = prompt_optional_positive_int(
+        "Omron DBP mmHg",
+        args.label_dbp,
+        input_func,
+        output_func,
+    )
+    args.label_omron_hr = prompt_optional_positive_int(
+        "Omron HR bpm",
+        args.label_omron_hr,
+        input_func,
+        output_func,
+    )
+    args.label_omron_timing = prompt_optional_choice(
+        "Omron label timing",
+        args.label_omron_timing,
+        OMRON_TIMING_CHOICES,
+        input_func,
+        output_func,
+    )
+
+    prompted_notes = input_func(f"Label notes{optional_prompt_suffix(args.label_notes)}: ")
+    args.label_notes = append_prompt_notes(args.label_notes, prompted_notes)
+
+    return label_inputs_present(args)
+
+
 def get_firmware_git_commit() -> str | None:
     """Return the current repo commit when this script is run from a Git checkout."""
     project_root = Path(__file__).resolve().parents[1]
@@ -320,6 +432,10 @@ def build_output_paths(outdir: Path, subject: str, session: str, trial_id: str) 
         "plot": outdir / f"{prefix}_plot.png",
         "zoom_plot": outdir / f"{prefix}_zoom_plot.png",
     }
+
+
+def build_label_csv_path(labels_dir: Path, session: str) -> Path:
+    return labels_dir / f"{safe_name(session)}_labels.csv"
 
 
 def ensure_output_paths_available(paths: dict[str, Path], overwrite: bool) -> None:
@@ -757,6 +873,73 @@ def print_summary(
     print(f"  zoom window: {zoom_start_s:.2f}-{zoom_end_s:.2f} s")
 
 
+def build_label_row(
+    args: argparse.Namespace,
+    summary: dict,
+    csv_path: Path,
+    metadata_path: Path,
+) -> dict:
+    timing_quality = summary.get("timing_quality") or ""
+    row = {
+        "session": args.session,
+        "trial_id": args.trial_id,
+        "subject": args.subject,
+        "ppg_csv": csv_path.as_posix(),
+        "metadata_json": metadata_path.as_posix(),
+        "posture": args.posture,
+        "ppg_location": args.sensor_location,
+        "ppg_hand": args.ppg_hand,
+        "cuff_arm": args.cuff_arm,
+        "sbp": args.label_sbp if args.label_sbp is not None else "",
+        "dbp": args.label_dbp if args.label_dbp is not None else "",
+        "omron_hr": args.label_omron_hr if args.label_omron_hr is not None else "",
+        "omron_timing": args.label_omron_timing or "unknown",
+        "timing_quality": timing_quality,
+        "quality": timing_quality,
+        "notes": args.label_notes,
+    }
+
+    return {column: row[column] for column in LABEL_COLUMNS}
+
+
+def write_label_row(labels_path: Path, row: dict, update_existing: bool = False, output_func=print) -> str:
+    labels_path.parent.mkdir(parents=True, exist_ok=True)
+    rows = []
+    if labels_path.exists():
+        with labels_path.open(newline="", encoding="utf-8") as handle:
+            rows = list(csv.DictReader(handle))
+
+    duplicate_index = next(
+        (
+            index
+            for index, existing_row in enumerate(rows)
+            if existing_row.get("session") == row["session"] and existing_row.get("trial_id") == row["trial_id"]
+        ),
+        None,
+    )
+
+    if duplicate_index is not None:
+        if not update_existing:
+            output_func(
+                f"WARNING: Label row already exists for session={row['session']} "
+                f"trial_id={row['trial_id']}; not appending duplicate."
+            )
+            return "duplicate_skipped"
+        rows[duplicate_index] = row
+        result = "updated"
+    else:
+        rows.append(row)
+        result = "appended"
+
+    with labels_path.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=LABEL_COLUMNS)
+        writer.writeheader()
+        writer.writerows(rows)
+
+    output_func(f"Label row {result}: {labels_path}")
+    return result
+
+
 def build_metadata(
     args: argparse.Namespace,
     summary: dict,
@@ -928,6 +1111,20 @@ def main() -> int:
 
     save_plot(df, plot_path, plt)
     save_zoom_plot(df, zoom_plot_path, plt, zoom_start_s, zoom_end_s)
+
+    should_write_label = label_inputs_present(args)
+    if args.prompt_labels:
+        should_write_label = apply_prompt_labels(args)
+
+    if should_write_label:
+        labels_path = build_label_csv_path(Path(args.labels_dir), args.session)
+        label_row = build_label_row(args, summary, csv_path, metadata_path)
+        label_result = write_label_row(labels_path, label_row)
+        if label_result == "duplicate_skipped" and args.prompt_labels:
+            answer = input("Update existing label row? [y/N]: ").strip().lower()
+            if answer in {"y", "yes"}:
+                write_label_row(labels_path, label_row, update_existing=True)
+
     print(f"Zoomed baseline-removed plot saved to: {zoom_plot_path}")
     print_summary(summary, csv_path, metadata_path, plot_path, zoom_plot_path, zoom_start_s, zoom_end_s)
 

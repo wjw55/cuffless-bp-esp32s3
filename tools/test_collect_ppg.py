@@ -1,4 +1,5 @@
 import unittest
+import csv
 from argparse import Namespace
 from contextlib import redirect_stderr
 from datetime import datetime, timezone
@@ -12,7 +13,10 @@ import pandas as pd
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from collect_ppg import (
+    LABEL_COLUMNS,
     apply_prompt_bp_after,
+    build_label_csv_path,
+    build_label_row,
     build_metadata,
     build_output_paths,
     create_firmware_diagnostics,
@@ -23,6 +27,7 @@ from collect_ppg import (
     summarize,
     update_firmware_diagnostics,
     validate_collection_args,
+    write_label_row,
 )
 
 
@@ -119,6 +124,13 @@ def make_args(**overrides):
         "cuff_timestamp": "",
         "notes": "",
         "prompt_bp_after": False,
+        "label_sbp": None,
+        "label_dbp": None,
+        "label_omron_hr": None,
+        "label_omron_timing": "",
+        "label_notes": "",
+        "prompt_labels": False,
+        "labels_dir": "data/labels",
     }
     defaults.update(overrides)
     return Namespace(**defaults)
@@ -431,6 +443,132 @@ class MetadataTests(unittest.TestCase):
             with self.subTest(overrides=overrides):
                 with self.assertRaises(SystemExit):
                     validate_collection_args(make_args(**overrides))
+
+
+class LabelCsvTests(unittest.TestCase):
+    def test_parses_label_cli_fields(self):
+        args = parse_args([
+            "--port",
+            "COM3",
+            "--duration",
+            "90",
+            "--subject",
+            "self",
+            "--session",
+            "omron_pilot_002",
+            "--trial-id",
+            "trial_001",
+            "--prompt-labels",
+            "--sbp",
+            "108",
+            "--dbp",
+            "61",
+            "--omron-hr",
+            "69",
+            "--omron-timing",
+            "during_ppg",
+            "--label-notes",
+            "Omron labelled finger PPG trial",
+        ])
+
+        self.assertTrue(args.prompt_labels)
+        self.assertEqual(args.label_sbp, 108)
+        self.assertEqual(args.label_dbp, 61)
+        self.assertEqual(args.label_omron_hr, 69)
+        self.assertEqual(args.label_omron_timing, "during_ppg")
+        self.assertEqual(args.label_notes, "Omron labelled finger PPG trial")
+
+    def test_builds_label_csv_path_for_session(self):
+        labels_path = build_label_csv_path(Path("data/labels"), "omron_pilot_002")
+
+        self.assertEqual(labels_path, Path("data/labels/omron_pilot_002_labels.csv"))
+
+    def test_builds_label_row_without_touching_raw_ppg_columns(self):
+        row = build_label_row(
+            make_args(
+                subject="self",
+                session="omron_pilot_002",
+                trial_id="trial_001",
+                posture="seated",
+                sensor_location="right_index_finger",
+                ppg_hand="right",
+                cuff_arm="left",
+                label_sbp=108,
+                label_dbp=61,
+                label_omron_hr=69,
+                label_omron_timing="during_ppg",
+                label_notes="Omron labelled finger PPG trial",
+            ),
+            make_summary(),
+            Path("data/raw/self_omron_pilot_002_trial_001_ppg.csv"),
+            Path("data/raw/self_omron_pilot_002_trial_001_metadata.json"),
+        )
+
+        self.assertEqual(list(row.keys()), LABEL_COLUMNS)
+        self.assertEqual(row["session"], "omron_pilot_002")
+        self.assertEqual(row["trial_id"], "trial_001")
+        self.assertEqual(row["subject"], "self")
+        self.assertEqual(row["ppg_csv"], "data/raw/self_omron_pilot_002_trial_001_ppg.csv")
+        self.assertEqual(row["metadata_json"], "data/raw/self_omron_pilot_002_trial_001_metadata.json")
+        self.assertEqual(row["ppg_location"], "right_index_finger")
+        self.assertEqual(row["sbp"], 108)
+        self.assertEqual(row["dbp"], 61)
+        self.assertEqual(row["omron_hr"], 69)
+        self.assertEqual(row["omron_timing"], "during_ppg")
+        self.assertEqual(row["timing_quality"], "good")
+        self.assertEqual(row["quality"], "good")
+
+    def test_write_label_row_creates_directory_and_skips_duplicates(self):
+        with TemporaryDirectory() as tmpdir:
+            labels_path = Path(tmpdir) / "data" / "labels" / "omron_pilot_002_labels.csv"
+            messages = []
+            row = build_label_row(
+                make_args(
+                    subject="self",
+                    session="omron_pilot_002",
+                    trial_id="trial_001",
+                    label_sbp=108,
+                    label_dbp=61,
+                    label_omron_hr=69,
+                ),
+                make_summary(),
+                Path("data/raw/self_omron_pilot_002_trial_001_ppg.csv"),
+                Path("data/raw/self_omron_pilot_002_trial_001_metadata.json"),
+            )
+
+            first_result = write_label_row(labels_path, row, output_func=messages.append)
+            second_result = write_label_row(labels_path, row, output_func=messages.append)
+
+            self.assertEqual(first_result, "appended")
+            self.assertEqual(second_result, "duplicate_skipped")
+            with labels_path.open(newline="", encoding="utf-8") as handle:
+                rows = list(csv.DictReader(handle))
+            self.assertEqual(len(rows), 1)
+            self.assertEqual(rows[0]["session"], "omron_pilot_002")
+            self.assertTrue(any("already exists" in message for message in messages))
+
+    def test_write_label_row_can_update_duplicate_when_confirmed(self):
+        with TemporaryDirectory() as tmpdir:
+            labels_path = Path(tmpdir) / "data" / "labels" / "omron_pilot_002_labels.csv"
+            original = build_label_row(
+                make_args(session="omron_pilot_002", trial_id="trial_001", label_sbp=108),
+                make_summary(),
+                Path("old.csv"),
+                Path("old.json"),
+            )
+            updated = dict(original)
+            updated["sbp"] = 109
+            updated["notes"] = "updated label"
+
+            write_label_row(labels_path, original, output_func=lambda _text: None)
+            result = write_label_row(labels_path, updated, update_existing=True, output_func=lambda _text: None)
+
+            self.assertEqual(result, "updated")
+            with labels_path.open(newline="", encoding="utf-8") as handle:
+                rows = list(csv.DictReader(handle))
+            self.assertEqual(len(rows), 1)
+            self.assertEqual(rows[0]["sbp"], "109")
+            self.assertEqual(rows[0]["notes"], "updated label")
 
 
 class OutputPathTests(unittest.TestCase):
