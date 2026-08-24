@@ -1,11 +1,12 @@
-"""Collect raw MAX30102 PPG rows from an ESP32 serial port.
+"""Collect synchronized MAX30102 PPG and optional ADXL345 IMU rows.
 
 Expected firmware output:
     sample_seq,timestamp_ms,red,ir
     42,12345,48231,53120
 
 This script saves one recording session as:
-    data/raw/<subject>_<session>_ppg.csv
+    data/raw/<subject>_<session>_<trial>_ppg.csv
+    data/raw/<subject>_<session>_<trial>_imu.csv
     data/raw/<subject>_<session>_metadata.json
     data/raw/<subject>_<session>_plot.png
 """
@@ -31,6 +32,10 @@ DEFAULT_ZOOM_START_S = 20.0
 DEFAULT_ZOOM_END_S = 30.0
 DEFAULT_ZOOM_DURATION_S = 10.0
 MAX_FIRMWARE_WARNING_EVENTS = 50
+MAX_FIRMWARE_HR_EVENTS = 600
+ADXL345_SCALE_G_PER_LSB = 0.0039
+ADXL345_SAMPLE_RATE_HZ = 100
+MOTION_MAD_MULTIPLIER = 6.0
 
 FIRMWARE_STATS_METADATA_KEYS = {
     "samples": "firmware_status_sample_count",
@@ -44,6 +49,19 @@ FIRMWARE_STATS_METADATA_KEYS = {
     "timestamp_corrections": "firmware_timestamp_correction_count",
     "timestamp_lag_warnings": "firmware_timestamp_lag_warning_count",
     "overflow_recoveries": "firmware_fifo_overflow_recovery_count",
+}
+
+IMU_FIRMWARE_STATS_METADATA_KEYS = {
+    "samples": "imu_firmware_sample_count",
+    "rate_hz": "imu_firmware_interval_rate_hz",
+    "effective_rate_hz": "imu_firmware_effective_rate_hz",
+    "fifo_entries": "imu_firmware_latest_fifo_entries",
+    "fifo_overflows": "imu_firmware_fifo_overflow_count",
+    "i2c_errors": "imu_firmware_i2c_error_count",
+    "timestamp_resyncs": "imu_firmware_timestamp_resync_count",
+    "timestamp_corrections": "imu_firmware_timestamp_correction_count",
+    "clock_adjustments": "imu_firmware_clock_adjustment_count",
+    "clock_adjustment_us": "imu_firmware_clock_adjustment_total_us",
 }
 
 LABEL_COLUMNS = [
@@ -106,7 +124,7 @@ def positive_int(value: str) -> int:
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Collect raw PPG CSV rows from ESP32/MAX30102 serial output."
+        description="Collect synchronized PPG and optional IMU rows from ESP32 serial output."
     )
     parser.add_argument("--port", required=True, help="Serial port, for example COM3")
     parser.add_argument("--duration", required=True, type=positive_float, help="Recording duration in seconds")
@@ -117,6 +135,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--sensor-location", default="", help="PPG sensor location, for example index_finger")
     parser.add_argument("--cuff-arm", default="", help="Arm used for cuff BP reference, for example left")
     parser.add_argument("--ppg-hand", default="", help="Hand used for PPG sensor, for example right")
+    parser.add_argument("--imu-location", default="", help="ADXL345 mounting location, for example right_forearm")
+    parser.add_argument(
+        "--imu-orientation",
+        default="",
+        help="ADXL345 axis orientation, for example x_distal_y_left_z_outward",
+    )
     parser.add_argument("--baud", type=int, default=115200, help="Serial baud rate, default 115200")
     parser.add_argument("--notes", default="", help="Optional notes saved into metadata")
     parser.add_argument(
@@ -428,9 +452,11 @@ def build_output_paths(outdir: Path, subject: str, session: str, trial_id: str) 
 
     return {
         "csv": outdir / f"{prefix}_ppg.csv",
+        "imu_csv": outdir / f"{prefix}_imu.csv",
         "metadata": outdir / f"{prefix}_metadata.json",
         "plot": outdir / f"{prefix}_plot.png",
         "zoom_plot": outdir / f"{prefix}_zoom_plot.png",
+        "motion_plot": outdir / f"{prefix}_motion_plot.png",
     }
 
 
@@ -474,6 +500,24 @@ def parse_ppg_row(line: str) -> tuple[int, int, int, int] | None:
     return sample_seq, timestamp_ms, red, ir
 
 
+def parse_imu_row(line: str) -> tuple[int, int, int, int, int] | None:
+    """Return a valid tagged ADXL345 row without confusing it with legacy PPG rows."""
+    parts = line.strip().split(",")
+    if len(parts) != 6 or parts[0].strip().lower() != "imu":
+        return None
+
+    try:
+        imu_seq, timestamp_ms, x_raw, y_raw, z_raw = (int(part.strip()) for part in parts[1:])
+    except ValueError:
+        return None
+
+    if imu_seq < 0 or timestamp_ms < 0:
+        return None
+    if any(value < -32768 or value > 32767 for value in (x_raw, y_raw, z_raw)):
+        return None
+    return imu_seq, timestamp_ms, x_raw, y_raw, z_raw
+
+
 def parse_firmware_status_value(value: str):
     cleaned = value.strip().strip(",")
 
@@ -515,6 +559,9 @@ def parse_firmware_status_line(line: str) -> tuple[str, dict] | None:
 def create_firmware_diagnostics() -> dict:
     return {
         "latest_stats": {},
+        "latest_imu_stats": {},
+        "latest_hr": {},
+        "hr_updates": [],
         "metadata_fields": {},
         "warning_events": [],
     }
@@ -532,6 +579,19 @@ def update_firmware_diagnostics(diagnostics: dict, parsed_status: tuple[str, dic
         for status_key, metadata_key in FIRMWARE_STATS_METADATA_KEYS.items():
             if status_key in fields:
                 metadata_fields[metadata_key] = fields[status_key]
+        return
+
+    if status_type == "imu_stats":
+        diagnostics["latest_imu_stats"] = fields
+        for status_key, metadata_key in IMU_FIRMWARE_STATS_METADATA_KEYS.items():
+            if status_key in fields:
+                metadata_fields[metadata_key] = fields[status_key]
+        return
+
+    if status_type == "hr":
+        diagnostics["latest_hr"] = fields
+        if len(diagnostics["hr_updates"]) < MAX_FIRMWARE_HR_EVENTS:
+            diagnostics["hr_updates"].append(fields)
         return
 
     if status_type != "warning":
@@ -553,6 +613,10 @@ def update_firmware_diagnostics(diagnostics: dict, parsed_status: tuple[str, dic
         metadata_fields["firmware_timestamp_correction_count"] = fields["count"]
     elif event == "timestamp_lag" and "count" in fields:
         metadata_fields["firmware_timestamp_lag_warning_count"] = fields["count"]
+    elif event == "imu_fifo_overflow" and "count" in fields:
+        metadata_fields["imu_firmware_fifo_overflow_count"] = fields["count"]
+    elif event in {"imu_fifo_read_failed", "imu_fifo_status_failed"} and "i2c_errors" in fields:
+        metadata_fields["imu_firmware_i2c_error_count"] = fields["i2c_errors"]
 
 
 def classify_timing_quality(
@@ -721,6 +785,111 @@ def summarize(df, requested_duration_s: float) -> dict:
     }
 
 
+def add_motion_columns(imu_df):
+    """Convert raw acceleration to g and derive a data-adaptive motion flag."""
+    result = imu_df.copy()
+    for axis in ("x", "y", "z"):
+        result[f"{axis}_g"] = result[f"{axis}_raw"].astype(float) * ADXL345_SCALE_G_PER_LSB
+
+    result["accel_magnitude_g"] = (
+        result["x_g"] ** 2 + result["y_g"] ** 2 + result["z_g"] ** 2
+    ) ** 0.5
+    gravity_window_samples = ADXL345_SAMPLE_RATE_HZ + 1
+    result["gravity_estimate_g"] = result["accel_magnitude_g"].rolling(
+        gravity_window_samples,
+        center=True,
+        min_periods=1,
+    ).median()
+    result["dynamic_accel_g"] = (result["accel_magnitude_g"] - result["gravity_estimate_g"]).abs()
+
+    median_dynamic = float(result["dynamic_accel_g"].median()) if len(result) else 0.0
+    mad = (
+        float((result["dynamic_accel_g"] - median_dynamic).abs().median())
+        if len(result)
+        else 0.0
+    )
+    threshold_g = median_dynamic + MOTION_MAD_MULTIPLIER * 1.4826 * mad
+    result["motion_candidate"] = result["dynamic_accel_g"] > threshold_g
+    return result, threshold_g
+
+
+def summarize_imu(imu_df, requested_duration_s: float) -> dict:
+    """Summarize raw IMU timing and exploratory, recording-specific motion flags."""
+    sample_count = int(len(imu_df))
+    summary = {
+        "sample_count": sample_count,
+        "requested_duration_s": requested_duration_s,
+        "data_duration_s": None,
+        "sample_sequence_start": None,
+        "sample_sequence_end": None,
+        "missing_sample_sequences": 0,
+        "median_dt_ms": None,
+        "mean_sample_interval_ms": None,
+        "min_sample_interval_ms": None,
+        "max_sample_interval_ms": None,
+        "p95_sample_interval_ms": None,
+        "p99_sample_interval_ms": None,
+        "estimated_rate_hz": None,
+        "timestamp_gaps_gt_15ms": 0,
+        "timestamp_gaps_gt_20ms": 0,
+        "non_increasing_timestamp_count": 0,
+        "timing_quality": "reject",
+        "timing_quality_reason": "No IMU samples were recorded.",
+        "motion_threshold_g": None,
+        "motion_candidate_samples": 0,
+        "motion_candidate_fraction": None,
+        "warnings": [],
+    }
+    if sample_count == 0:
+        summary["warnings"].append("No ADXL345 samples were recorded; check wiring and I2C address 0x53.")
+        return summary
+
+    summary["sample_sequence_start"] = int(imu_df["imu_seq"].iloc[0])
+    summary["sample_sequence_end"] = int(imu_df["imu_seq"].iloc[-1])
+    sequence_delta = imu_df["imu_seq"].diff().dropna()
+    forward_gaps = sequence_delta[sequence_delta > 1]
+    summary["missing_sample_sequences"] = int((forward_gaps - 1).sum()) if len(forward_gaps) else 0
+    if bool((sequence_delta <= 0).any()):
+        summary["warnings"].append("IMU sequence numbers are not strictly increasing.")
+
+    if sample_count >= 2:
+        dt_ms = imu_df["timestamp_ms"].diff().dropna()
+        summary["data_duration_s"] = float(
+            (imu_df["timestamp_ms"].iloc[-1] - imu_df["timestamp_ms"].iloc[0]) / 1000.0
+        )
+        summary["median_dt_ms"] = float(dt_ms.median())
+        summary["mean_sample_interval_ms"] = float(dt_ms.mean())
+        summary["min_sample_interval_ms"] = float(dt_ms.min())
+        summary["max_sample_interval_ms"] = float(dt_ms.max())
+        summary["p95_sample_interval_ms"] = float(dt_ms.quantile(0.95))
+        summary["p99_sample_interval_ms"] = float(dt_ms.quantile(0.99))
+        summary["timestamp_gaps_gt_15ms"] = int((dt_ms > 15).sum())
+        summary["timestamp_gaps_gt_20ms"] = int((dt_ms > 20).sum())
+        summary["non_increasing_timestamp_count"] = int((dt_ms <= 0).sum())
+        if summary["median_dt_ms"] > 0:
+            summary["estimated_rate_hz"] = 1000.0 / summary["median_dt_ms"]
+        summary["timing_quality"], summary["timing_quality_reason"] = classify_timing_quality(
+            summary["missing_sample_sequences"],
+            summary["non_increasing_timestamp_count"],
+            summary["timestamp_gaps_gt_15ms"],
+            summary["timestamp_gaps_gt_20ms"],
+            summary["max_sample_interval_ms"],
+        )
+
+    enriched, threshold_g = add_motion_columns(imu_df)
+    motion_samples = int(enriched["motion_candidate"].sum())
+    summary["motion_threshold_g"] = threshold_g
+    summary["motion_candidate_samples"] = motion_samples
+    summary["motion_candidate_fraction"] = motion_samples / sample_count
+    if summary["missing_sample_sequences"]:
+        summary["warnings"].append(
+            f"IMU sequence gaps detected: {summary['missing_sample_sequences']} missing sequence number(s)."
+        )
+    if summary["timing_quality"] in {"borderline", "reject"}:
+        summary["warnings"].append(f"IMU timing {summary['timing_quality']}: {summary['timing_quality_reason']}")
+    return summary
+
+
 def resolve_plot_window(df, plot_start: float | None, plot_end: float | None) -> tuple[float, float]:
     """Choose the zoom window in seconds relative to the first recorded sample."""
     if plot_start is not None and plot_end is not None:
@@ -812,12 +981,62 @@ def save_zoom_plot(df, zoom_plot_path: Path, plt, start_s: float, end_s: float) 
     plt.close(fig)
 
 
+def save_motion_plot(ppg_df, imu_df, motion_plot_path: Path, plt) -> None:
+    """Plot both streams against their shared ESP timer and highlight motion candidates."""
+    fig, axes = plt.subplots(3, 1, sharex=True, figsize=(11, 8))
+    first_timestamps = []
+    if len(ppg_df):
+        first_timestamps.append(float(ppg_df["timestamp_ms"].iloc[0]))
+    if len(imu_df):
+        first_timestamps.append(float(imu_df["timestamp_ms"].iloc[0]))
+    origin_ms = min(first_timestamps) if first_timestamps else 0.0
+
+    if len(ppg_df):
+        ppg_time_s = (ppg_df["timestamp_ms"].astype(float) - origin_ms) / 1000.0
+        axes[0].plot(ppg_time_s, baseline_removed(ppg_df["ir"]), linewidth=0.75, color="tab:blue")
+    else:
+        axes[0].text(0.5, 0.5, "No PPG samples", ha="center", va="center", transform=axes[0].transAxes)
+
+    if len(imu_df):
+        enriched, threshold_g = add_motion_columns(imu_df)
+        imu_time_s = (enriched["timestamp_ms"].astype(float) - origin_ms) / 1000.0
+        axes[1].plot(imu_time_s, enriched["accel_magnitude_g"], linewidth=0.75, color="tab:green")
+        axes[2].plot(imu_time_s, enriched["dynamic_accel_g"], linewidth=0.75, color="tab:orange")
+        axes[2].axhline(threshold_g, color="tab:red", linestyle="--", linewidth=0.9, label="data-adaptive threshold")
+        axes[2].fill_between(
+            imu_time_s,
+            0,
+            enriched["dynamic_accel_g"],
+            where=enriched["motion_candidate"],
+            color="tab:red",
+            alpha=0.3,
+            label="motion candidate",
+        )
+        axes[2].legend(loc="upper right")
+    else:
+        axes[1].text(0.5, 0.5, "No IMU samples", ha="center", va="center", transform=axes[1].transAxes)
+
+    axes[0].set_ylabel("IR - mean")
+    axes[1].set_ylabel("|accel| (g)")
+    axes[2].set_ylabel("Dynamic (g)")
+    axes[2].set_xlabel("Shared ESP timer (s)")
+    axes[0].set_title("Synchronized PPG and general body/arm motion diagnostic")
+    for axis in axes:
+        axis.grid(True, alpha=0.3)
+    fig.tight_layout()
+    fig.savefig(motion_plot_path, dpi=150)
+    plt.close(fig)
+
+
 def print_summary(
     summary: dict,
+    imu_summary: dict,
     csv_path: Path,
+    imu_csv_path: Path,
     metadata_path: Path,
     plot_path: Path,
     zoom_plot_path: Path,
+    motion_plot_path: Path,
     zoom_start_s: float,
     zoom_end_s: float,
 ) -> None:
@@ -865,11 +1084,21 @@ def print_summary(
     else:
         print("  warnings: none")
 
+    print("\nIMU summary")
+    print(f"  sample count: {imu_summary['sample_count']}")
+    print(f"  estimated sampling rate: {format_optional(imu_summary['estimated_rate_hz'])} Hz")
+    print(f"  missing sample seq: {imu_summary['missing_sample_sequences']}")
+    print(f"  timing quality: {imu_summary['timing_quality']} - {imu_summary['timing_quality_reason']}")
+    print(f"  exploratory motion threshold: {format_optional(imu_summary['motion_threshold_g'], 4)} g")
+    print(f"  candidate motion fraction: {format_optional(imu_summary['motion_candidate_fraction'], 4)}")
+
     print("\nSaved files")
     print(f"  CSV: {csv_path}")
+    print(f"  IMU CSV: {imu_csv_path}")
     print(f"  metadata: {metadata_path}")
     print(f"  plot: {plot_path}")
     print(f"  zoom plot: {zoom_plot_path}")
+    print(f"  motion plot: {motion_plot_path}")
     print(f"  zoom window: {zoom_start_s:.2f}-{zoom_end_s:.2f} s")
 
 
@@ -950,12 +1179,45 @@ def build_metadata(
     zoom_end_s: float,
     csv_path: Path | None = None,
     firmware_diagnostics: dict | None = None,
+    imu_summary: dict | None = None,
+    imu_csv_path: Path | None = None,
 ) -> dict:
     firmware_diagnostics = firmware_diagnostics or create_firmware_diagnostics()
+    imu_summary = imu_summary or {
+        "sample_count": 0,
+        "data_duration_s": None,
+        "sample_sequence_start": None,
+        "sample_sequence_end": None,
+        "missing_sample_sequences": 0,
+        "median_dt_ms": None,
+        "mean_sample_interval_ms": None,
+        "min_sample_interval_ms": None,
+        "max_sample_interval_ms": None,
+        "p95_sample_interval_ms": None,
+        "p99_sample_interval_ms": None,
+        "estimated_rate_hz": None,
+        "timestamp_gaps_gt_15ms": 0,
+        "timestamp_gaps_gt_20ms": 0,
+        "non_increasing_timestamp_count": 0,
+        "timing_quality": "reject",
+        "timing_quality_reason": "No IMU samples were recorded.",
+        "motion_threshold_g": None,
+        "motion_candidate_samples": 0,
+        "motion_candidate_fraction": None,
+        "warnings": [],
+    }
     firmware_metadata = {
         metadata_key: firmware_diagnostics["metadata_fields"].get(metadata_key)
-        for metadata_key in FIRMWARE_STATS_METADATA_KEYS.values()
+        for metadata_key in (
+            list(FIRMWARE_STATS_METADATA_KEYS.values()) + list(IMU_FIRMWARE_STATS_METADATA_KEYS.values())
+        )
     }
+    imu_warnings = list(imu_summary["warnings"])
+    if imu_summary["sample_count"] > 0:
+        if not getattr(args, "imu_location", "").strip():
+            imu_warnings.append("IMU samples were recorded without --imu-location metadata.")
+        if not getattr(args, "imu_orientation", "").strip():
+            imu_warnings.append("IMU samples were recorded without --imu-orientation metadata.")
 
     metadata = {
         "subject_id": args.subject,
@@ -963,10 +1225,25 @@ def build_metadata(
         "trial_id": args.trial_id,
         "output_csv_filename": csv_path.name if csv_path is not None else None,
         "output_csv_path": str(csv_path) if csv_path is not None else None,
+        "output_imu_csv_filename": imu_csv_path.name if imu_csv_path is not None else None,
+        "output_imu_csv_path": str(imu_csv_path) if imu_csv_path is not None else None,
         "posture": args.posture,
         "sensor_location": args.sensor_location,
         "cuff_arm": args.cuff_arm,
         "ppg_hand": args.ppg_hand,
+        "imu_sensor_model": "ADXL345",
+        "imu_configured_i2c_address": "0x53",
+        "imu_detected": imu_summary["sample_count"] > 0,
+        "imu_i2c_address": "0x53" if imu_summary["sample_count"] > 0 else None,
+        "imu_location": getattr(args, "imu_location", ""),
+        "imu_orientation": getattr(args, "imu_orientation", ""),
+        "imu_range_g": 4,
+        "imu_full_resolution": True,
+        "imu_nominal_sample_rate_hz": ADXL345_SAMPLE_RATE_HZ,
+        "imu_scale_g_per_lsb": ADXL345_SCALE_G_PER_LSB,
+        "imu_role": "general_body_arm_motion_quality_flag",
+        "imu_local_finger_motion_limitation": True,
+        "sensor_timestamp_timebase": "esp_timer_monotonic",
         "port": args.port,
         "baud_rate": args.baud,
         "duration_seconds": args.duration,
@@ -1003,10 +1280,40 @@ def build_metadata(
         "zoom_plot_start_seconds": zoom_start_s,
         "zoom_plot_end_seconds": zoom_end_s,
         "warnings": summary["warnings"],
+        "imu_sample_count": imu_summary["sample_count"],
+        "imu_data_duration_seconds": imu_summary["data_duration_s"],
+        "imu_sample_sequence_start": imu_summary["sample_sequence_start"],
+        "imu_sample_sequence_end": imu_summary["sample_sequence_end"],
+        "imu_missing_sample_sequences": imu_summary["missing_sample_sequences"],
+        "imu_median_sample_interval_ms": imu_summary["median_dt_ms"],
+        "imu_mean_sample_interval_ms": imu_summary["mean_sample_interval_ms"],
+        "imu_min_sample_interval_ms": imu_summary["min_sample_interval_ms"],
+        "imu_max_sample_interval_ms": imu_summary["max_sample_interval_ms"],
+        "imu_p95_sample_interval_ms": imu_summary["p95_sample_interval_ms"],
+        "imu_p99_sample_interval_ms": imu_summary["p99_sample_interval_ms"],
+        "imu_timestamp_gaps_gt_15ms": imu_summary["timestamp_gaps_gt_15ms"],
+        "imu_timestamp_gaps_gt_20ms": imu_summary["timestamp_gaps_gt_20ms"],
+        "imu_non_increasing_timestamp_count": imu_summary["non_increasing_timestamp_count"],
+        "imu_timing_quality": imu_summary["timing_quality"],
+        "imu_timing_quality_reason": imu_summary["timing_quality_reason"],
+        "imu_approximate_sampling_rate_hz": imu_summary["estimated_rate_hz"],
+        "imu_motion_threshold_method": "median_plus_6_scaled_mad_of_dynamic_acceleration",
+        "imu_motion_threshold_g": imu_summary["motion_threshold_g"],
+        "imu_motion_candidate_samples": imu_summary["motion_candidate_samples"],
+        "imu_motion_candidate_fraction": imu_summary["motion_candidate_fraction"],
+        "imu_warnings": imu_warnings,
     }
 
     metadata.update(firmware_metadata)
     metadata["firmware_latest_stats"] = firmware_diagnostics["latest_stats"] or None
+    metadata["imu_firmware_latest_stats"] = firmware_diagnostics["latest_imu_stats"] or None
+    metadata["firmware_latest_hr"] = firmware_diagnostics["latest_hr"] or None
+    metadata["firmware_hr_updates"] = firmware_diagnostics["hr_updates"]
+    metadata["firmware_hr_update_count"] = len(firmware_diagnostics["hr_updates"])
+    metadata["firmware_hr_stable_update_count"] = sum(
+        update.get("status") == "stable" and isinstance(update.get("bpm"), (int, float))
+        for update in firmware_diagnostics["hr_updates"]
+    )
     metadata["firmware_warning_events"] = firmware_diagnostics["warning_events"]
 
     return metadata
@@ -1036,11 +1343,14 @@ def main() -> int:
         return 1
 
     csv_path = output_paths["csv"]
+    imu_csv_path = output_paths["imu_csv"]
     metadata_path = output_paths["metadata"]
     plot_path = output_paths["plot"]
     zoom_plot_path = output_paths["zoom_plot"]
+    motion_plot_path = output_paths["motion_plot"]
 
     rows: list[tuple[int, int, int, int]] = []
+    imu_rows: list[tuple[int, int, int, int, int]] = []
     ignored_lines = 0
     interrupted = False
     firmware_diagnostics = create_firmware_diagnostics()
@@ -1063,6 +1373,10 @@ def main() -> int:
 
                 line = raw_line.decode("utf-8", errors="replace")
                 update_firmware_diagnostics(firmware_diagnostics, parse_firmware_status_line(line))
+                imu_row = parse_imu_row(line)
+                if imu_row is not None:
+                    imu_rows.append(imu_row)
+                    continue
                 row = parse_ppg_row(line)
                 if row is None:
                     ignored_lines += 1
@@ -1084,9 +1398,12 @@ def main() -> int:
         return 1
 
     df = pd.DataFrame(rows, columns=["sample_seq", "timestamp_ms", "red", "ir"])
+    imu_df = pd.DataFrame(imu_rows, columns=["imu_seq", "timestamp_ms", "x_raw", "y_raw", "z_raw"])
     df.to_csv(csv_path, index=False)
+    imu_df.to_csv(imu_csv_path, index=False)
 
     summary = summarize(df, args.duration)
+    imu_summary = summarize_imu(imu_df, args.duration)
     try:
         zoom_start_s, zoom_end_s = resolve_plot_window(df, args.plot_start, args.plot_end)
     except ValueError as exc:
@@ -1106,11 +1423,14 @@ def main() -> int:
         zoom_end_s,
         csv_path,
         firmware_diagnostics,
+        imu_summary,
+        imu_csv_path,
     )
     metadata_path.write_text(json.dumps(metadata, indent=2) + "\n", encoding="utf-8")
 
     save_plot(df, plot_path, plt)
     save_zoom_plot(df, zoom_plot_path, plt, zoom_start_s, zoom_end_s)
+    save_motion_plot(df, imu_df, motion_plot_path, plt)
 
     should_write_label = label_inputs_present(args)
     if args.prompt_labels:
@@ -1126,7 +1446,18 @@ def main() -> int:
                 write_label_row(labels_path, label_row, update_existing=True)
 
     print(f"Zoomed baseline-removed plot saved to: {zoom_plot_path}")
-    print_summary(summary, csv_path, metadata_path, plot_path, zoom_plot_path, zoom_start_s, zoom_end_s)
+    print_summary(
+        summary,
+        imu_summary,
+        csv_path,
+        imu_csv_path,
+        metadata_path,
+        plot_path,
+        zoom_plot_path,
+        motion_plot_path,
+        zoom_start_s,
+        zoom_end_s,
+    )
 
     return 0
 

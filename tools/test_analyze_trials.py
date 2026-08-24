@@ -16,6 +16,8 @@ from analyze_trials import (
     discover_trial_pairs,
     estimate_ppg_hr,
     infer_timing_quality,
+    summarize_live_hr,
+    summarize_live_hr_validation,
 )
 
 
@@ -92,6 +94,47 @@ def write_trial(input_dir: Path, metadata: dict, df=None, write_csv=True, write_
 
 
 class AnalyzeTrialsTests(unittest.TestCase):
+    def test_summarizes_stable_live_hr_against_offline_and_cuff_references(self):
+        metadata = {
+            "firmware_hr_updates": [
+                {"timestamp_ms": 8000, "bpm": "na", "status": "warming_up", "beats": 2},
+                {"timestamp_ms": 9000, "bpm": 70.0, "status": "stable", "beats": 5},
+                {"timestamp_ms": 10000, "bpm": 74.0, "status": "stable", "beats": 6},
+                {"timestamp_ms": 11000, "bpm": "na", "status": "poor_signal", "beats": 6},
+            ]
+        }
+
+        summary = summarize_live_hr(metadata, offline_hr_bpm=72.0, cuff_hr_bpm=71.0)
+
+        self.assertEqual(summary["live_hr_update_count"], 4)
+        self.assertEqual(summary["live_hr_stable_update_count"], 2)
+        self.assertEqual(summary["live_hr_mean_bpm"], 72.0)
+        self.assertEqual(summary["live_hr_mean_absolute_error_vs_offline_bpm"], 2.0)
+        self.assertEqual(summary["live_hr_max_absolute_error_vs_cuff_bpm"], 3.0)
+
+    def test_aggregates_live_hr_validation_across_trials(self):
+        validation = summarize_live_hr_validation(
+            [
+                {
+                    "live_hr_mean_absolute_error_vs_offline_bpm": 2.0,
+                    "live_hr_max_absolute_error_vs_offline_bpm": 4.0,
+                    "live_hr_mean_absolute_error_vs_cuff_bpm": 3.0,
+                    "live_hr_max_absolute_error_vs_cuff_bpm": 5.0,
+                },
+                {
+                    "live_hr_mean_absolute_error_vs_offline_bpm": 4.0,
+                    "live_hr_max_absolute_error_vs_offline_bpm": 7.0,
+                    "live_hr_mean_absolute_error_vs_cuff_bpm": None,
+                    "live_hr_max_absolute_error_vs_cuff_bpm": None,
+                },
+            ]
+        )
+
+        self.assertEqual(validation["trials_with_offline_comparison"], 2)
+        self.assertEqual(validation["mean_trial_mae_vs_offline_bpm"], 3.0)
+        self.assertEqual(validation["max_update_error_vs_offline_bpm"], 7.0)
+        self.assertEqual(validation["trials_with_cuff_comparison"], 1)
+
     def test_matching_csv_metadata_pairs(self):
         with TemporaryDirectory() as tmpdir:
             input_dir = Path(tmpdir)
@@ -121,6 +164,36 @@ class AnalyzeTrialsTests(unittest.TestCase):
             self.assertGreater(row["ir_span"], 1000)
             self.assertEqual(row["firmware_fifo_overflow_count"], 0)
             self.assertEqual(row["firmware_timestamp_resync_count"], 0)
+            self.assertEqual(row["analysis_quality"], "usable")
+
+    def test_summary_row_includes_imu_quality_without_using_it_as_model_quality(self):
+        with TemporaryDirectory() as tmpdir:
+            input_dir = Path(tmpdir)
+            write_trial(
+                input_dir,
+                make_metadata(
+                    output_imu_csv_path="data/raw/test_imu.csv",
+                    imu_location="right_forearm",
+                    imu_orientation="x_distal_y_left_z_outward",
+                    imu_sample_count=2000,
+                    imu_approximate_sampling_rate_hz=100.0,
+                    imu_missing_sample_sequences=0,
+                    imu_timing_quality="good",
+                    imu_firmware_fifo_overflow_count=0,
+                    imu_firmware_i2c_error_count=0,
+                    imu_motion_threshold_g=0.04,
+                    imu_motion_candidate_fraction=0.02,
+                    imu_warnings=[],
+                ),
+            )
+            pair = discover_trial_pairs(input_dir, "omron_pilot_001")[0][0]
+
+            row = build_summary_row(pair)
+
+            self.assertEqual(row["imu_location"], "right_forearm")
+            self.assertEqual(row["imu_sample_count"], 2000)
+            self.assertEqual(row["imu_timing_quality"], "good")
+            self.assertEqual(row["imu_motion_candidate_fraction"], 0.02)
             self.assertEqual(row["analysis_quality"], "usable")
 
     def test_usable_timing_ignores_legacy_timestamp_warning(self):

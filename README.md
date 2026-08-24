@@ -1,6 +1,6 @@
-# ESP32-S3 MAX30102 PPG Logger
+# ESP32-S3 MAX30102 PPG + ADXL345 Motion Logger
 
-Raw PPG acquisition firmware for an ESP32-S3 and MAX30102 sensor. The current goal is reliable red/IR PPG capture before collecting Omron cuff blood pressure labels.
+Synchronized raw PPG and motion acquisition firmware for an ESP32-S3, MAX30102, and optional ADXL345. The ADXL345 is used to flag general body/arm motion that may corrupt PPG; it is not a blood-pressure model input.
 
 ## Wiring
 
@@ -13,6 +13,20 @@ Raw PPG acquisition firmware for an ESP32-S3 and MAX30102 sensor. The current go
 | INT | Not used |
 
 The firmware enables internal I2C pullups, but many MAX30102 breakout boards already include pullups. If using a bare sensor board, add suitable external pullups, for example 4.7 kOhm to 3V3.
+
+The GY-291/ADXL345 shares the same I2C bus:
+
+| GY-291 ADXL345 | ESP32-S3 |
+| --- | --- |
+| VCC | 3V3 |
+| GND | GND |
+| SDA | GPIO 8 |
+| SCL | GPIO 9 |
+| CS | High / I2C mode |
+| SDO or ALT ADDRESS | GND, selecting `0x53` |
+| INT1 / INT2 | Not used |
+
+Use 3.3 V power and logic. Both breakouts may contain pullups; if communication is unreliable, measure the combined pullup resistance before adding more. The firmware expects the MAX30102 at `0x57` and verifies the ADXL345 device ID at `0x53`. If the IMU is absent, it warns and continues in PPG-only mode.
 
 ## ESP-IDF Environment
 
@@ -50,11 +64,25 @@ The firmware prints CSV samples and comment-prefixed status lines. Press `Ctrl+]
 ```csv
 sample_seq,timestamp_ms,red,ir
 0,12345,48231,53120
+imu,0,12346,-12,8,258
 1,12355,48244,53145
 # stats samples=500 captured_samples=500 rate_hz=99.8 effective_rate_hz=99.9 fifo_avail=2 ovf=0 i2c_errors=0 timestamp_resyncs=0 timestamp_corrections=0 overflow_recoveries=0
+# imu_stats samples=500 rate_hz=100.0 effective_rate_hz=99.9 fifo_entries=1 fifo_overflows=0 i2c_errors=0 timestamp_resyncs=0 timestamp_corrections=0 clock_adjustments=480 clock_adjustment_us=-11840
+# hr timestamp_ms=20420 bpm=72.4 status=stable beats=6
 ```
 
-Only rows without a leading `#` are data samples. Lines beginning with `#` are status/debug comments and are safe for the Python collector to ignore.
+Four-column numeric rows remain backward-compatible PPG records. Six-column rows tagged `imu` are ADXL345 records. Lines beginning with `#` are status/debug records.
+
+## Live Heart Rate
+
+The firmware prints a live heart-rate status approximately once per second without changing either raw stream. It waits eight seconds after detecting a finger, causally removes the IR baseline, smooths the signal, detects plausible peaks between 40 and 180 BPM, and reports the median of up to seven recent beat intervals.
+
+```text
+# hr timestamp_ms=10420 bpm=na status=warming_up beats=2
+# hr timestamp_ms=20420 bpm=72.4 status=stable beats=6
+```
+
+Possible states are `warming_up`, `stable`, `poor_signal`, `no_finger`, and `insufficient_beats`. Only `stable` contains a BPM. Live BPM is a demonstration and signal-quality estimate; saved offline analysis remains authoritative until repeated comparisons against offline and Omron HR are acceptable.
 
 ## Collect A 90-Second PPG-Only Recording
 
@@ -69,6 +97,8 @@ python tools\collect_ppg.py `
   --trial-id ppg_only_001 `
   --posture seated `
   --sensor-location right_index_finger `
+  --imu-location right_forearm `
+  --imu-orientation x_distal_y_left_z_outward `
   --ppg-hand right `
   --cuff-arm left `
   --notes "Unlabeled stability check before BP collection"
@@ -77,9 +107,11 @@ python tools\collect_ppg.py `
 The collector saves:
 
 - `data/raw/<subject>_<session>_<trial_id>_ppg.csv`
+- `data/raw/<subject>_<session>_<trial_id>_imu.csv`
 - `data/raw/<subject>_<session>_<trial_id>_metadata.json`
 - `data/raw/<subject>_<session>_<trial_id>_plot.png`
 - `data/raw/<subject>_<session>_<trial_id>_zoom_plot.png`
+- `data/raw/<subject>_<session>_<trial_id>_motion_plot.png`
 
 Existing output files are not overwritten by default. Use `--overwrite` only when you intentionally want to replace a previous recording.
 
@@ -93,6 +125,29 @@ sample_seq,timestamp_ms,red,ir
 - `timestamp_ms`: ESP timer timestamp in milliseconds. The first captured sample initializes the firmware timestamp cursor, then each emitted sample advances by the nominal 10 ms period.
 - `red`: raw MAX30102 red channel ADC value.
 - `ir`: raw MAX30102 IR channel ADC value.
+
+The raw IMU CSV remains separate:
+
+```csv
+imu_seq,timestamp_ms,x_raw,y_raw,z_raw
+```
+
+The axes are signed raw readings converted during analysis using approximately `0.0039 g/LSB`. PPG and IMU timestamps use the same ESP timer, while each stream retains its own sequence counter and FIFO timing. The IMU cursor continuously tracks the observed ADXL345 clock because its real output rate can differ from the nominal 100 Hz; `clock_adjustments` and cumulative `clock_adjustment_us` appear in `# imu_stats`.
+
+The motion plot contains PPG, acceleration magnitude, gravity-removed dynamic acceleration, and exploratory motion candidates. Its threshold is calculated independently for each recording as the median plus six scaled median absolute deviations. Validate these flags with labelled motion periods before using them to reject data.
+
+## IMU Validation Order
+
+1. Confirm startup finds `0x57` and verifies the ADXL345 at `0x53`.
+2. Point each axis upward and downward; the gravity axis should read near `+1 g` or `-1 g`, with the other axes near zero.
+3. Make a stationary 90-second recording. Require approximately 100 Hz, monotonic timestamps, no missing sequences, no FIFO overflows, and no I2C errors for both streams.
+4. Record labelled stillness, gentle arm movement, larger movement, and deliberate sensor disturbance. Confirm flagged movement aligns with PPG artifacts.
+
+An arm- or torso-mounted ADXL345 measures general motion and may miss local finger movement. Keep its mounting position and axis orientation consistent and record both for every trial.
+
+## AD8232 Is Deferred
+
+Do not add the AD8232 until combined PPG+IMU capture passes the validation sequence. ECG integration needs a verified ESP32-S3 ADC pin, 250-500 Hz acquisition, lead-off inputs, filtering, synchronization, and noise tests. A hobby AD8232 module is not medically isolated; define a battery-powered or properly isolated on-body setup before attaching electrodes, and do not create a body-to-mains/USB-ground path.
 
 ## Before Omron-Labeled Collection
 

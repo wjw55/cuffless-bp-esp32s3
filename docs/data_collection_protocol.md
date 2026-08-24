@@ -1,4 +1,4 @@
-# CDE3301 PPG and Omron Pilot Data Collection Protocol
+# CDE3301 PPG, Motion, and Omron Pilot Data Collection Protocol
 
 ## Purpose
 
@@ -16,6 +16,7 @@ Blood pressure labels and collection details are stored in the trial metadata JS
 
 - Microcontroller: ESP32-S3.
 - PPG sensor: MAX30102.
+- Motion sensor: optional ADXL345 on the arm or torso in a repeatable orientation.
 - Reference device: Omron cuff BP monitor.
 - Firmware output: serial CSV rows plus comment-prefixed debug/status lines.
 - Collection tool: `tools/collect_ppg.py`.
@@ -31,6 +32,8 @@ Typical MAX30102 wiring:
 | SCL | GPIO 9 |
 | INT | Not used |
 
+The ADXL345 shares SDA GPIO 8 and SCL GPIO 9, uses 3.3 V and common ground, has `CS` configured for I2C, and has `SDO/ALT ADDRESS` tied low for address `0x53`. Its interrupt pins are unused.
+
 ## Subject Posture
 
 - Seated posture.
@@ -45,7 +48,9 @@ Typical MAX30102 wiring:
 - Omron cuff on the left upper arm.
 - MAX30102 sensor on the right index finger or right middle finger.
 - Keep the PPG sensor stable and avoid changing finger pressure during the trial.
+- Secure the ADXL345 at the location named by `--imu-location` and use the axis orientation named by `--imu-orientation` consistently.
 - Keep the cuff arm and PPG hand supported to reduce motion artifacts.
+- An arm- or torso-mounted IMU flags general movement but may miss local finger motion.
 
 ## Timing Procedure
 
@@ -56,10 +61,12 @@ Typical MAX30102 wiring:
 5. Enter systolic BP, diastolic BP, cuff HR, cuff timing, and notes into metadata.
 6. Repeat only a small number of trials first, then inspect quality before collecting more.
 
+During recording, `# hr` reports live BPM or an explicit quality state once per second. Allow at least eight seconds for `warming_up`; never transcribe a numeric value unless its status is `stable`. The saved offline HR remains the reference analysis result.
+
 Example command:
 
 ```powershell
-python tools\collect_ppg.py --port COM3 --duration 90 --subject test --session omron_pilot_001 --trial-id omron_001 --posture seated --sensor-location right_index_finger --cuff-arm left --ppg-hand right --cuff-start-time-s 25 --notes "Omron pilot trial 1" --prompt-bp-after
+python tools\collect_ppg.py --port COM3 --duration 90 --subject test --session omron_pilot_001 --trial-id omron_001 --posture seated --sensor-location right_index_finger --imu-location right_forearm --imu-orientation x_distal_y_left_z_outward --cuff-arm left --ppg-hand right --cuff-start-time-s 25 --notes "Omron pilot trial 1" --prompt-bp-after
 ```
 
 ## Metadata Fields Recorded
@@ -80,6 +87,13 @@ Protocol metadata:
 - `cuff_arm`
 - `ppg_hand`
 - `notes`
+- `imu_location`
+- `imu_orientation`
+- ADXL345 model, range, rate, scale, and I2C address
+
+IMU quality metadata includes the raw-file path, sample and sequence counts, timing statistics, firmware FIFO/I2C diagnostics, data-adaptive motion threshold, candidate fraction, and warnings. Motion candidates are exploratory quality flags only and are not BP model features.
+
+Live-HR metadata stores every firmware status update. Session analysis reports the number of stable updates, mean and median live BPM, mean absolute error, and maximum absolute error against offline PPG HR and cuff HR when available. Validate stationary trials at lower, normal, and elevated heart rates before treating live BPM as reliable.
 
 Recording metadata:
 

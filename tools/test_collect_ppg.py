@@ -14,6 +14,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from collect_ppg import (
     LABEL_COLUMNS,
+    add_motion_columns,
     apply_prompt_bp_after,
     build_label_csv_path,
     build_label_row,
@@ -23,8 +24,10 @@ from collect_ppg import (
     ensure_output_paths_available,
     parse_args,
     parse_firmware_status_line,
+    parse_imu_row,
     parse_ppg_row,
     summarize,
+    summarize_imu,
     update_firmware_diagnostics,
     validate_collection_args,
     write_label_row,
@@ -37,6 +40,18 @@ class ParsePpgRowTests(unittest.TestCase):
 
     def test_ignores_new_csv_header(self):
         self.assertIsNone(parse_ppg_row("sample_seq,timestamp_ms,red,ir"))
+
+
+class ParseImuRowTests(unittest.TestCase):
+    def test_parses_tagged_signed_raw_axes(self):
+        self.assertEqual(parse_imu_row("imu,42,12345,-256,0,257"), (42, 12345, -256, 0, 257))
+
+    def test_rejects_header_and_out_of_range_axis(self):
+        self.assertIsNone(parse_imu_row("imu,imu_seq,timestamp_ms,x_raw,y_raw,z_raw"))
+        self.assertIsNone(parse_imu_row("imu,1,100,40000,0,0"))
+
+    def test_ppg_parser_ignores_imu_rows(self):
+        self.assertIsNone(parse_ppg_row("imu,42,12345,-256,0,257"))
 
 
 class FirmwareStatusParsingTests(unittest.TestCase):
@@ -102,6 +117,38 @@ class FirmwareStatusParsingTests(unittest.TestCase):
         self.assertEqual(diagnostics["metadata_fields"]["firmware_timestamp_resync_count"], 1)
         self.assertEqual(diagnostics["metadata_fields"]["firmware_timestamp_lag_warning_count"], 3)
         self.assertEqual(diagnostics["warning_events"][0]["event"], "timestamp_lag")
+
+    def test_tracks_imu_stats_separately(self):
+        diagnostics = create_firmware_diagnostics()
+        update_firmware_diagnostics(
+            diagnostics,
+            parse_firmware_status_line(
+                "# imu_stats samples=501 rate_hz=100.0 effective_rate_hz=99.8 "
+                "fifo_entries=1 fifo_overflows=0 i2c_errors=0 "
+                "timestamp_resyncs=0 timestamp_corrections=0 "
+                "clock_adjustments=480 clock_adjustment_us=-11840"
+            ),
+        )
+
+        self.assertEqual(diagnostics["latest_imu_stats"]["samples"], 501)
+        self.assertEqual(diagnostics["metadata_fields"]["imu_firmware_interval_rate_hz"], 100.0)
+        self.assertEqual(diagnostics["metadata_fields"]["imu_firmware_fifo_overflow_count"], 0)
+        self.assertEqual(diagnostics["metadata_fields"]["imu_firmware_clock_adjustment_count"], 480)
+        self.assertEqual(diagnostics["metadata_fields"]["imu_firmware_clock_adjustment_total_us"], -11840)
+
+    def test_tracks_live_hr_status_updates_without_treating_them_as_raw_rows(self):
+        diagnostics = create_firmware_diagnostics()
+        stable_line = "# hr timestamp_ms=20420 bpm=72.4 status=stable beats=6"
+        warming_line = "# hr timestamp_ms=10420 bpm=na status=warming_up beats=2"
+
+        update_firmware_diagnostics(diagnostics, parse_firmware_status_line(warming_line))
+        update_firmware_diagnostics(diagnostics, parse_firmware_status_line(stable_line))
+
+        self.assertEqual(len(diagnostics["hr_updates"]), 2)
+        self.assertEqual(diagnostics["latest_hr"]["bpm"], 72.4)
+        self.assertEqual(diagnostics["latest_hr"]["status"], "stable")
+        self.assertIsNone(parse_ppg_row(stable_line))
+        self.assertIsNone(parse_imu_row(stable_line))
 
 
 def make_args(**overrides):
@@ -174,6 +221,41 @@ def make_ppg_df(timestamps_ms, sample_seq=None):
     )
 
 
+def make_imu_df(timestamps_ms, x_raw=None):
+    sample_count = len(timestamps_ms)
+    return pd.DataFrame(
+        {
+            "imu_seq": list(range(sample_count)),
+            "timestamp_ms": timestamps_ms,
+            "x_raw": x_raw if x_raw is not None else [0] * sample_count,
+            "y_raw": [0] * sample_count,
+            "z_raw": [256] * sample_count,
+        }
+    )
+
+
+class ImuSummaryTests(unittest.TestCase):
+    def test_stationary_100_hz_capture_has_good_timing(self):
+        imu_df = make_imu_df(list(range(0, 1000, 10)))
+
+        summary = summarize_imu(imu_df, requested_duration_s=1.0)
+
+        self.assertEqual(summary["sample_count"], 100)
+        self.assertEqual(summary["missing_sample_sequences"], 0)
+        self.assertEqual(summary["estimated_rate_hz"], 100.0)
+        self.assertEqual(summary["timing_quality"], "good")
+
+    def test_motion_spike_is_flagged_by_recording_specific_threshold(self):
+        x_raw = [0] * 100
+        x_raw[50] = 300
+        imu_df = make_imu_df(list(range(0, 1000, 10)), x_raw=x_raw)
+
+        enriched, threshold_g = add_motion_columns(imu_df)
+
+        self.assertGreater(float(enriched.loc[50, "dynamic_accel_g"]), threshold_g)
+        self.assertTrue(bool(enriched.loc[50, "motion_candidate"]))
+
+
 class MetadataTests(unittest.TestCase):
     def test_builds_ppg_only_metadata_without_bp_fields(self):
         metadata = build_metadata(
@@ -216,6 +298,59 @@ class MetadataTests(unittest.TestCase):
 
         self.assertEqual(metadata["output_csv_filename"], "test_omron_pilot_001_omron_001_ppg.csv")
         self.assertEqual(metadata["output_csv_path"], str(csv_path))
+
+    def test_metadata_records_imu_configuration_and_quality(self):
+        imu_summary = summarize_imu(make_imu_df(list(range(0, 1000, 10))), requested_duration_s=1.0)
+        imu_csv_path = Path("data/raw/test_baseline_001_T01_imu.csv")
+        args = make_args()
+        args.imu_location = "right_forearm"
+        args.imu_orientation = "x_distal_y_left_z_outward"
+
+        metadata = build_metadata(
+            args,
+            make_summary(),
+            datetime(2026, 6, 7, 20, 0, tzinfo=timezone.utc),
+            interrupted=False,
+            ignored_lines=0,
+            zoom_start_s=0.0,
+            zoom_end_s=1.0,
+            imu_summary=imu_summary,
+            imu_csv_path=imu_csv_path,
+        )
+
+        self.assertEqual(metadata["imu_sensor_model"], "ADXL345")
+        self.assertEqual(metadata["imu_location"], "right_forearm")
+        self.assertEqual(metadata["imu_sample_count"], 100)
+        self.assertEqual(metadata["imu_timing_quality"], "good")
+        self.assertEqual(metadata["output_imu_csv_path"], str(imu_csv_path))
+        self.assertEqual(metadata["sensor_timestamp_timebase"], "esp_timer_monotonic")
+        self.assertEqual(metadata["imu_warnings"], [])
+
+    def test_metadata_preserves_live_hr_updates(self):
+        diagnostics = create_firmware_diagnostics()
+        update_firmware_diagnostics(
+            diagnostics,
+            parse_firmware_status_line("# hr timestamp_ms=9000 bpm=na status=warming_up beats=2"),
+        )
+        update_firmware_diagnostics(
+            diagnostics,
+            parse_firmware_status_line("# hr timestamp_ms=10000 bpm=71.8 status=stable beats=5"),
+        )
+
+        metadata = build_metadata(
+            make_args(),
+            make_summary(),
+            datetime(2026, 6, 7, 20, 0, tzinfo=timezone.utc),
+            interrupted=False,
+            ignored_lines=0,
+            zoom_start_s=0.0,
+            zoom_end_s=10.0,
+            firmware_diagnostics=diagnostics,
+        )
+
+        self.assertEqual(metadata["firmware_hr_update_count"], 2)
+        self.assertEqual(metadata["firmware_hr_stable_update_count"], 1)
+        self.assertEqual(metadata["firmware_latest_hr"]["bpm"], 71.8)
 
     def test_metadata_includes_timestamp_diagnostics(self):
         metadata = build_metadata(

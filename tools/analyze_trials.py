@@ -58,6 +58,21 @@ SUMMARY_FIELDS = [
     "firmware_timestamp_resync_count",
     "firmware_timestamp_correction_count",
     "firmware_timestamp_lag_warning_count",
+    "imu_csv_file",
+    "imu_location",
+    "imu_orientation",
+    "imu_sample_count",
+    "imu_approximate_sampling_rate_hz",
+    "imu_missing_sample_sequences",
+    "imu_timing_quality",
+    "imu_firmware_fifo_overflow_count",
+    "imu_firmware_i2c_error_count",
+    "imu_firmware_effective_rate_hz",
+    "imu_firmware_clock_adjustment_count",
+    "imu_firmware_clock_adjustment_total_us",
+    "imu_motion_threshold_g",
+    "imu_motion_candidate_fraction",
+    "imu_warnings",
     "warnings",
     "ignored_legacy_warnings",
     "red_min",
@@ -69,6 +84,14 @@ SUMMARY_FIELDS = [
     "estimated_ppg_hr_bpm",
     "num_detected_peaks",
     "hr_error_vs_cuff_bpm",
+    "live_hr_update_count",
+    "live_hr_stable_update_count",
+    "live_hr_mean_bpm",
+    "live_hr_median_bpm",
+    "live_hr_mean_absolute_error_vs_offline_bpm",
+    "live_hr_max_absolute_error_vs_offline_bpm",
+    "live_hr_mean_absolute_error_vs_cuff_bpm",
+    "live_hr_max_absolute_error_vs_cuff_bpm",
     "analysis_quality",
     "analysis_quality_reason",
 ]
@@ -440,6 +463,39 @@ def metadata_warnings_to_list(value: Any) -> list[str]:
     return [str(value)]
 
 
+def summarize_live_hr(metadata: dict[str, Any], offline_hr_bpm: float | None, cuff_hr_bpm: float | None) -> dict[str, Any]:
+    updates = metadata.get("firmware_hr_updates")
+    if not isinstance(updates, list):
+        updates = []
+
+    stable_bpms: list[float] = []
+    for update in updates:
+        if not isinstance(update, dict) or update.get("status") != "stable":
+            continue
+        bpm = update.get("bpm")
+        if isinstance(bpm, (int, float)) and MIN_HR_BPM <= float(bpm) <= MAX_HR_BPM:
+            stable_bpms.append(float(bpm))
+
+    def errors(reference_bpm: float | None) -> tuple[float | None, float | None]:
+        if reference_bpm is None or not stable_bpms:
+            return None, None
+        absolute_errors = [abs(bpm - float(reference_bpm)) for bpm in stable_bpms]
+        return round(float(np.mean(absolute_errors)), 2), round(max(absolute_errors), 2)
+
+    offline_mae, offline_max_error = errors(offline_hr_bpm)
+    cuff_mae, cuff_max_error = errors(cuff_hr_bpm)
+    return {
+        "live_hr_update_count": len(updates),
+        "live_hr_stable_update_count": len(stable_bpms),
+        "live_hr_mean_bpm": round(float(np.mean(stable_bpms)), 2) if stable_bpms else None,
+        "live_hr_median_bpm": round(float(np.median(stable_bpms)), 2) if stable_bpms else None,
+        "live_hr_mean_absolute_error_vs_offline_bpm": offline_mae,
+        "live_hr_max_absolute_error_vs_offline_bpm": offline_max_error,
+        "live_hr_mean_absolute_error_vs_cuff_bpm": cuff_mae,
+        "live_hr_max_absolute_error_vs_cuff_bpm": cuff_max_error,
+    }
+
+
 def empty_summary_row(pair: TrialPair, quality_reason: str) -> dict[str, Any]:
     metadata = pair.metadata
     row = {field: None for field in SUMMARY_FIELDS}
@@ -479,6 +535,7 @@ def build_summary_row(pair: TrialPair) -> dict[str, Any]:
     hr_error = None
     if cuff_hr_bpm is not None and estimated_hr is not None:
         hr_error = round(float(estimated_hr) - float(cuff_hr_bpm), 2)
+    live_hr_summary = summarize_live_hr(metadata, estimated_hr, cuff_hr_bpm)
 
     missing_sample_sequences = get_number(metadata, "missing_sample_sequences", csv_stats["missing_sample_sequences"])
     timing_stats = {
@@ -516,7 +573,7 @@ def build_summary_row(pair: TrialPair) -> dict[str, Any]:
         metadata_warnings=effective_warnings,
     )
 
-    return {
+    row = {
         "subject_id": metadata.get("subject_id"),
         "session_id": metadata.get("session_id"),
         "trial_id": metadata.get("trial_id"),
@@ -570,6 +627,21 @@ def build_summary_row(pair: TrialPair) -> dict[str, Any]:
         "firmware_timestamp_resync_count": metadata.get("firmware_timestamp_resync_count"),
         "firmware_timestamp_correction_count": metadata.get("firmware_timestamp_correction_count"),
         "firmware_timestamp_lag_warning_count": metadata.get("firmware_timestamp_lag_warning_count"),
+        "imu_csv_file": metadata.get("output_imu_csv_path"),
+        "imu_location": metadata.get("imu_location"),
+        "imu_orientation": metadata.get("imu_orientation"),
+        "imu_sample_count": metadata.get("imu_sample_count"),
+        "imu_approximate_sampling_rate_hz": metadata.get("imu_approximate_sampling_rate_hz"),
+        "imu_missing_sample_sequences": metadata.get("imu_missing_sample_sequences"),
+        "imu_timing_quality": metadata.get("imu_timing_quality"),
+        "imu_firmware_fifo_overflow_count": metadata.get("imu_firmware_fifo_overflow_count"),
+        "imu_firmware_i2c_error_count": metadata.get("imu_firmware_i2c_error_count"),
+        "imu_firmware_effective_rate_hz": metadata.get("imu_firmware_effective_rate_hz"),
+        "imu_firmware_clock_adjustment_count": metadata.get("imu_firmware_clock_adjustment_count"),
+        "imu_firmware_clock_adjustment_total_us": metadata.get("imu_firmware_clock_adjustment_total_us"),
+        "imu_motion_threshold_g": metadata.get("imu_motion_threshold_g"),
+        "imu_motion_candidate_fraction": metadata.get("imu_motion_candidate_fraction"),
+        "imu_warnings": "; ".join(metadata_warnings_to_list(metadata.get("imu_warnings"))),
         "warnings": "; ".join(metadata_warnings),
         "ignored_legacy_warnings": "; ".join(ignored_legacy_warnings),
         "red_min": red_min,
@@ -584,6 +656,8 @@ def build_summary_row(pair: TrialPair) -> dict[str, Any]:
         "analysis_quality": analysis_quality,
         "analysis_quality_reason": analysis_reason,
     }
+    row.update(live_hr_summary)
+    return row
 
 
 def save_peak_plot(pair: TrialPair, row: dict[str, Any], plot_path: Path) -> None:
@@ -634,6 +708,38 @@ def rows_to_jsonable(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return cleaned_rows
 
 
+def summarize_live_hr_validation(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    offline_maes = [
+        float(row["live_hr_mean_absolute_error_vs_offline_bpm"])
+        for row in rows
+        if row.get("live_hr_mean_absolute_error_vs_offline_bpm") is not None
+    ]
+    offline_max_errors = [
+        float(row["live_hr_max_absolute_error_vs_offline_bpm"])
+        for row in rows
+        if row.get("live_hr_max_absolute_error_vs_offline_bpm") is not None
+    ]
+    cuff_maes = [
+        float(row["live_hr_mean_absolute_error_vs_cuff_bpm"])
+        for row in rows
+        if row.get("live_hr_mean_absolute_error_vs_cuff_bpm") is not None
+    ]
+    cuff_max_errors = [
+        float(row["live_hr_max_absolute_error_vs_cuff_bpm"])
+        for row in rows
+        if row.get("live_hr_max_absolute_error_vs_cuff_bpm") is not None
+    ]
+
+    return {
+        "trials_with_offline_comparison": len(offline_maes),
+        "mean_trial_mae_vs_offline_bpm": round(float(np.mean(offline_maes)), 2) if offline_maes else None,
+        "max_update_error_vs_offline_bpm": round(max(offline_max_errors), 2) if offline_max_errors else None,
+        "trials_with_cuff_comparison": len(cuff_maes),
+        "mean_trial_mae_vs_cuff_bpm": round(float(np.mean(cuff_maes)), 2) if cuff_maes else None,
+        "max_update_error_vs_cuff_bpm": round(max(cuff_max_errors), 2) if cuff_max_errors else None,
+    }
+
+
 def print_console_summary(
     session_id: str,
     rows: list[dict[str, Any]],
@@ -642,6 +748,7 @@ def print_console_summary(
     summary_json_path: Path,
     include_borderline: bool,
     verbose: bool,
+    live_hr_validation: dict[str, Any],
 ) -> None:
     usable_count = sum(row.get("analysis_quality") == "usable" for row in rows)
     borderline_count = sum(row.get("analysis_quality") == "borderline" for row in rows)
@@ -671,6 +778,14 @@ def print_console_summary(
     else:
         print("- none")
     print()
+    print("Live HR validation:")
+    print(f"- trials compared with offline HR: {live_hr_validation['trials_with_offline_comparison']}")
+    print(f"- mean trial MAE vs offline HR: {live_hr_validation['mean_trial_mae_vs_offline_bpm']}")
+    print(f"- max live update error vs offline HR: {live_hr_validation['max_update_error_vs_offline_bpm']}")
+    print(f"- trials compared with cuff HR: {live_hr_validation['trials_with_cuff_comparison']}")
+    print(f"- mean trial MAE vs cuff HR: {live_hr_validation['mean_trial_mae_vs_cuff_bpm']}")
+    print(f"- max live update error vs cuff HR: {live_hr_validation['max_update_error_vs_cuff_bpm']}")
+    print()
     print("Saved:")
     print(f"- {summary_csv_path}")
     print(f"- {summary_json_path}")
@@ -684,6 +799,7 @@ def main(argv: list[str] | None = None) -> int:
 
     pairs, problems = discover_trial_pairs(input_dir, args.session, args.subject)
     rows = [build_summary_row(pair) for pair in pairs]
+    live_hr_validation = summarize_live_hr_validation(rows)
 
     summary_csv_path = output_session_dir / "session_summary.csv"
     summary_json_path = output_session_dir / "session_summary.json"
@@ -708,6 +824,7 @@ def main(argv: list[str] | None = None) -> int:
             "borderline": sum(row.get("analysis_quality") == "borderline" for row in rows),
             "reject": sum(row.get("analysis_quality") == "reject" for row in rows),
         },
+        "live_hr_validation": live_hr_validation,
     }
     summary_json_path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
 
@@ -719,6 +836,7 @@ def main(argv: list[str] | None = None) -> int:
         summary_json_path,
         args.include_borderline,
         args.verbose,
+        live_hr_validation,
     )
     return 0
 
