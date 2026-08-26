@@ -9,6 +9,7 @@
 #include "adxl345.h"
 #include "live_hr.h"
 #include "max30102.h"
+#include "motion_status.h"
 
 #define I2C_MASTER_PORT I2C_NUM_0
 #define I2C_MASTER_SDA_IO 8
@@ -22,6 +23,7 @@
 #define SIGNAL_QUALITY_SATURATION_MARGIN 1000
 #define TIMESTAMP_LAG_WARNING_STEP_US (5 * MAX30102_SAMPLE_PERIOD_US)
 #define I2C_WARNING_THROTTLE_MS 1000
+#define MOTION_STATUS_PERIOD_MS 1000
 
 static esp_err_t i2c_master_init(void)
 {
@@ -102,6 +104,10 @@ void app_main(void)
     int64_t next_timestamp_lag_warning_us = TIMESTAMP_LAG_WARNING_STEP_US;
     live_hr_state_t live_hr_state;
     live_hr_init(&live_hr_state);
+    motion_status_state_t motion_state;
+    motion_status_init(&motion_state);
+    int64_t next_imu_unavailable_status_ms =
+        (esp_timer_get_time() / 1000) + MOTION_STATUS_PERIOD_MS;
 
     uint64_t imu_sample_seq = 0;
     uint64_t last_stats_imu_sample_seq = 0;
@@ -363,11 +369,42 @@ void app_main(void)
                            (int)x,
                            (int)y,
                            (int)z);
+                    motion_status_report_t motion_report = {0};
+                    if (motion_status_process_sample(
+                            &motion_state,
+                            timestamp_us / 1000,
+                            x,
+                            y,
+                            z,
+                            &motion_report)) {
+                        uint32_t activity_mg =
+                            (uint32_t)((motion_report.activity_g * 1000.0f) + 0.5f);
+                        uint32_t threshold_mg =
+                            (uint32_t)((motion_report.moving_threshold_g * 1000.0f) + 0.5f);
+                        printf("# motion timestamp_ms=%" PRId64
+                               " status=%s activity_g=%" PRIu32 ".%03" PRIu32
+                               " threshold_g=%" PRIu32 ".%03" PRIu32 "\n",
+                               motion_report.timestamp_ms,
+                               motion_status_name(motion_report.status),
+                               activity_mg / 1000,
+                               activity_mg % 1000,
+                               threshold_mg / 1000,
+                               threshold_mg % 1000);
+                    }
                     last_emitted_imu_timestamp_us = timestamp_us;
                     next_imu_sample_timestamp_us = timestamp_us + ADXL345_SAMPLE_PERIOD_US;
                     imu_sample_seq++;
                     imu_entries--;
                 }
+            }
+        } else {
+            int64_t now_ms = esp_timer_get_time() / 1000;
+            if (now_ms >= next_imu_unavailable_status_ms) {
+                printf("# motion timestamp_ms=%" PRId64
+                       " status=%s activity_g=na threshold_g=na\n",
+                       now_ms,
+                       motion_status_name(MOTION_STATUS_IMU_UNAVAILABLE));
+                next_imu_unavailable_status_ms = now_ms + MOTION_STATUS_PERIOD_MS;
             }
         }
 

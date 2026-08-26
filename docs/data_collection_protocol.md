@@ -95,6 +95,23 @@ IMU quality metadata includes the raw-file path, sample and sequence counts, tim
 
 Live-HR metadata stores every firmware status update. Session analysis reports the number of stable updates, mean and median live BPM, mean absolute error, and maximum absolute error against offline PPG HR and cuff HR when available. Validate stationary trials at lower, normal, and elevated heart rates before treating live BPM as reliable.
 
+The display-only command `python tools\view_live_hr.py --port COM3` is for demonstrations and does not save data. It displays firmware `# motion` states but does not use motion to suppress BPM. Never substitute it for `collect_ppg.py` during a validation or labelled trial. Close the ESP-IDF monitor and any other serial program before starting either tool.
+
+## Controlled Motion Calibration
+
+Keep the finger PPG setup unchanged and record three 90-second trials. In each trial follow: 0-20 s still, 20-30 s gentle arm movement, 30-45 s still, 45-55 s larger movement, 55-70 s still, 70-80 s deliberate sensor disturbance, and 80-90 s still. Run `tools/calibrate_motion.py` on the three IMU CSV files. The tool uses a causal 100-sample RMS window and ignores guarded transition/recovery margins. Configure firmware only when at least 95% of guarded stationary time is classified still and at least 90% of guarded movement blocks are detected. Keep BPM suppression disabled regardless of the calibration result.
+
+## Upper-Arm Feasibility Phase
+
+- Keep the Omron cuff on the left upper arm.
+- Co-locate MAX30102 and ADXL345 on the inner right upper arm, initially 2-3 cm above the elbow crease.
+- Use an opaque elastic strap and record a repeatable tension mark; neither loose contact nor tissue-compressing pressure is acceptable.
+- Record `--ppg-profile upper_arm_experimental`, exact `--sensor-location`, `--ppg-orientation`, `--mounting-method`, `--strap-tension`, `--led-current-ma`, IMU location, and IMU orientation.
+- Perform three placement checks before five paired finger/upper-arm sessions over at least two days.
+- Require at least four usable upper-arm trials, at least 99.5% sample completeness, no FIFO/I2C errors, mean offline HR error at or below 5 BPM, and repeatable pulse morphology.
+- Recalibrate motion after moving the IMU. Do not suppress live BPM until movement is shown to align with upper-arm PPG corruption.
+- Do not lower the finger contact threshold or change LED current without evidence from the upper-arm raw recordings.
+
 Recording metadata:
 
 - `port`

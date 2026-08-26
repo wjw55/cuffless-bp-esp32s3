@@ -150,6 +150,17 @@ class FirmwareStatusParsingTests(unittest.TestCase):
         self.assertIsNone(parse_ppg_row(stable_line))
         self.assertIsNone(parse_imu_row(stable_line))
 
+    def test_tracks_motion_status_without_treating_it_as_raw_data(self):
+        diagnostics = create_firmware_diagnostics()
+        motion_line = "# motion timestamp_ms=20420 status=still activity_g=0.018 threshold_g=0.050"
+
+        update_firmware_diagnostics(diagnostics, parse_firmware_status_line(motion_line))
+
+        self.assertEqual(diagnostics["latest_motion"]["status"], "still")
+        self.assertEqual(diagnostics["motion_updates"][0]["activity_g"], 0.018)
+        self.assertIsNone(parse_ppg_row(motion_line))
+        self.assertIsNone(parse_imu_row(motion_line))
+
 
 def make_args(**overrides):
     defaults = {
@@ -158,6 +169,11 @@ def make_args(**overrides):
         "trial_id": "T01",
         "posture": "seated",
         "sensor_location": "right_index_finger",
+        "ppg_profile": "finger",
+        "ppg_orientation": "",
+        "mounting_method": "",
+        "strap_tension": "",
+        "led_current_ma": 7.2,
         "cuff_arm": "left",
         "ppg_hand": "right",
         "port": "COM3",
@@ -351,6 +367,37 @@ class MetadataTests(unittest.TestCase):
         self.assertEqual(metadata["firmware_hr_update_count"], 2)
         self.assertEqual(metadata["firmware_hr_stable_update_count"], 1)
         self.assertEqual(metadata["firmware_latest_hr"]["bpm"], 71.8)
+
+    def test_metadata_preserves_motion_and_upper_arm_mounting_details(self):
+        diagnostics = create_firmware_diagnostics()
+        update_firmware_diagnostics(
+            diagnostics,
+            parse_firmware_status_line(
+                "# motion timestamp_ms=10000 status=moving activity_g=0.120 threshold_g=0.050"
+            ),
+        )
+        metadata = build_metadata(
+            make_args(
+                sensor_location="right_inner_upper_arm_3cm_above_elbow_crease",
+                ppg_profile="upper_arm_experimental",
+                ppg_orientation="leds_distal_photodiode_proximal",
+                mounting_method="opaque_elastic_strap_dark_foam",
+                strap_tension="mark_2",
+            ),
+            make_summary(),
+            datetime(2026, 6, 7, 20, 0, tzinfo=timezone.utc),
+            interrupted=False,
+            ignored_lines=0,
+            zoom_start_s=0.0,
+            zoom_end_s=10.0,
+            firmware_diagnostics=diagnostics,
+        )
+
+        self.assertEqual(metadata["ppg_profile"], "upper_arm_experimental")
+        self.assertEqual(metadata["ppg_strap_tension"], "mark_2")
+        self.assertEqual(metadata["ppg_led_current_ma"], 7.2)
+        self.assertEqual(metadata["firmware_motion_update_count"], 1)
+        self.assertEqual(metadata["firmware_latest_motion"]["status"], "moving")
 
     def test_metadata_includes_timestamp_diagnostics(self):
         metadata = build_metadata(

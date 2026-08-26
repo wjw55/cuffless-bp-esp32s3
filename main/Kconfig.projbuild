@@ -1,0 +1,12 @@
+menu "PPG logger motion classification"
+
+config MOTION_THRESHOLD_MG
+    int "Validated moving threshold (mg)"
+    range 0 4000
+    default 0
+    help
+        Moving threshold in milli-g produced by tools/calibrate_motion.py.
+        Keep this at 0 until controlled trials pass validation. With 0, the
+        firmware reports motion status as calibrating and never suppresses BPM.
+
+endmenu

@@ -69,6 +69,7 @@ imu,0,12346,-12,8,258
 # stats samples=500 captured_samples=500 rate_hz=99.8 effective_rate_hz=99.9 fifo_avail=2 ovf=0 i2c_errors=0 timestamp_resyncs=0 timestamp_corrections=0 overflow_recoveries=0
 # imu_stats samples=500 rate_hz=100.0 effective_rate_hz=99.9 fifo_entries=1 fifo_overflows=0 i2c_errors=0 timestamp_resyncs=0 timestamp_corrections=0 clock_adjustments=480 clock_adjustment_us=-11840
 # hr timestamp_ms=20420 bpm=72.4 status=stable beats=6
+# motion timestamp_ms=20420 status=calibrating activity_g=0.018 threshold_g=0.000
 ```
 
 Four-column numeric rows remain backward-compatible PPG records. Six-column rows tagged `imu` are ADXL345 records. Lines beginning with `#` are status/debug records.
@@ -83,6 +84,40 @@ The firmware prints a live heart-rate status approximately once per second witho
 ```
 
 Possible states are `warming_up`, `stable`, `poor_signal`, `no_finger`, and `insufficient_beats`. Only `stable` contains a BPM. Live BPM is a demonstration and signal-quality estimate; saved offline analysis remains authoritative until repeated comparisons against offline and Omron HR are acceptable.
+
+## Presentation-Only Viewer
+
+For a clean supervisor demonstration, close `idf.py monitor`, the collector, and any other program using the serial port, then run:
+
+```powershell
+python tools\view_live_hr.py --port COM3
+```
+
+Replace `COM3` with the ESP32 port. The viewer refreshes one fixed terminal screen showing BPM, heart-rate status, beats used, update age, PPG/IMU rates, I2C errors, FIFO overflows, connection health, and recent warnings. It consumes but hides all raw sensor rows and intentionally saves no files. Opening the serial port may reset the ESP32, so expect the normal eight-second heart-rate warm-up.
+
+Optional serial and refresh settings are available:
+
+```powershell
+python tools\view_live_hr.py --port COM3 --baud 115200 --refresh 1
+```
+
+Press `Ctrl+C` to exit. Use `tools\collect_ppg.py` instead whenever the session must be saved for analysis; the presentation viewer and collector cannot use the same COM port simultaneously.
+
+## Calibrate Still/Moving
+
+Motion classification is disabled safely by default: `CONFIG_MOTION_THRESHOLD_MG=0` makes firmware report `calibrating`. BPM is never suppressed in this milestone.
+
+With the finger PPG and the IMU in its documented location, collect three 90-second trials using the same timed sequence each time: 0-20 s still, 20-30 s gentle arm motion, 30-45 s still, 45-55 s larger movement, 55-70 s still, 70-80 s deliberate sensor disturbance, and 80-90 s still.
+
+Use distinct trial IDs, for example `motion_001`, `motion_002`, and `motion_003`, then calibrate them:
+
+```powershell
+python tools\calibrate_motion.py "data\raw\test_motion_calibration_motion_*_imu.csv" --output data\processed\motion_calibration.json
+```
+
+The tool and firmware use the same causal gravity removal and one-second (100-sample) rolling RMS activity calculation. Calibration excludes transition and recovery margins, then searches integer milli-g thresholds from lowest to highest. A threshold is accepted only when at least 95% of guarded stationary time is classified still and at least 90% of the guarded movement blocks are detected. Detection may occur anywhere inside a movement block; it is no longer required within 0.5 seconds of a manually timed cue. Do not configure a threshold after a failed result.
+
+After a passing result, open `idf.py menuconfig`, select **PPG logger motion classification**, enter the reported `CONFIG_MOTION_THRESHOLD_MG` value, rebuild, flash, and repeat the controlled protocol. `view_live_hr.py` will then display `Still` or `Moving` while continuing to show BPM independently. Motion never suppresses BPM in this milestone, even after calibration passes.
 
 ## Collect A 90-Second PPG-Only Recording
 
@@ -136,6 +171,8 @@ The axes are signed raw readings converted during analysis using approximately `
 
 The motion plot contains PPG, acceleration magnitude, gravity-removed dynamic acceleration, and exploratory motion candidates. Its threshold is calculated independently for each recording as the median plus six scaled median absolute deviations. Validate these flags with labelled motion periods before using them to reject data.
 
+The exploratory plot threshold is separate from the causal firmware threshold produced by `calibrate_motion.py`.
+
 ## IMU Validation Order
 
 1. Confirm startup finds `0x57` and verifies the ADXL345 at `0x53`.
@@ -144,6 +181,18 @@ The motion plot contains PPG, acceleration magnitude, gravity-removed dynamic ac
 4. Record labelled stillness, gentle arm movement, larger movement, and deliberate sensor disturbance. Confirm flagged movement aligns with PPG artifacts.
 
 An arm- or torso-mounted ADXL345 measures general motion and may miss local finger movement. Keep its mounting position and axis orientation consistent and record both for every trial.
+
+## Experimental Upper-Arm Feasibility
+
+Only begin this phase after finger-based `Still`/`Moving` passes validation. Keep the Omron cuff on the left arm and mount the MAX30102 and ADXL345 together on the inner right upper arm with an opaque elastic strap. Start approximately 2-3 cm above the elbow crease; record the exact site, module orientation, mounting material, strap-tension mark, and configured LED current.
+
+Example raw feasibility recording:
+
+```powershell
+python tools\collect_ppg.py --port COM3 --duration 90 --subject test --session upper_arm_feasibility_001 --trial-id upper_arm_001 --posture seated --sensor-location right_inner_upper_arm_3cm_above_elbow_crease --ppg-profile upper_arm_experimental --ppg-orientation leds_distal_photodiode_proximal --mounting-method opaque_elastic_strap_dark_foam --strap-tension mark_2 --led-current-ma 7.2 --imu-location right_upper_arm_adjacent_to_ppg --imu-orientation x_distal_y_left_z_outward --cuff-arm left --notes "Raw upper-arm feasibility; do not interpret as BP"
+```
+
+The existing `50,000` contact threshold and 7.2 mA LED setting are finger settings, not validated upper-arm settings. Collect and inspect raw data before defining an upper-arm firmware profile. A usable HR alone does not establish repeatable pulse morphology or cuffless BP capability.
 
 ## AD8232 Is Deferred
 

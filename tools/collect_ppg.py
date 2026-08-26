@@ -33,6 +33,7 @@ DEFAULT_ZOOM_END_S = 30.0
 DEFAULT_ZOOM_DURATION_S = 10.0
 MAX_FIRMWARE_WARNING_EVENTS = 50
 MAX_FIRMWARE_HR_EVENTS = 600
+MAX_FIRMWARE_MOTION_EVENTS = 600
 ADXL345_SCALE_G_PER_LSB = 0.0039
 ADXL345_SAMPLE_RATE_HZ = 100
 MOTION_MAD_MULTIPLIER = 6.0
@@ -133,6 +134,21 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--trial-id", default="", help="Trial ID, for example T01")
     parser.add_argument("--posture", default="", help="Subject posture, for example seated")
     parser.add_argument("--sensor-location", default="", help="PPG sensor location, for example index_finger")
+    parser.add_argument(
+        "--ppg-profile",
+        choices=("finger", "upper_arm_experimental"),
+        default="finger",
+        help="Optical placement profile; upper-arm remains experimental",
+    )
+    parser.add_argument("--ppg-orientation", default="", help="Optical module orientation on the skin")
+    parser.add_argument("--mounting-method", default="", help="How the optical sensor is secured")
+    parser.add_argument("--strap-tension", default="", help="Repeatable strap-tension mark or setting")
+    parser.add_argument(
+        "--led-current-ma",
+        type=positive_float,
+        default=7.2,
+        help="Configured MAX30102 LED current in mA, default 7.2",
+    )
     parser.add_argument("--cuff-arm", default="", help="Arm used for cuff BP reference, for example left")
     parser.add_argument("--ppg-hand", default="", help="Hand used for PPG sensor, for example right")
     parser.add_argument("--imu-location", default="", help="ADXL345 mounting location, for example right_forearm")
@@ -562,6 +578,8 @@ def create_firmware_diagnostics() -> dict:
         "latest_imu_stats": {},
         "latest_hr": {},
         "hr_updates": [],
+        "latest_motion": {},
+        "motion_updates": [],
         "metadata_fields": {},
         "warning_events": [],
     }
@@ -592,6 +610,12 @@ def update_firmware_diagnostics(diagnostics: dict, parsed_status: tuple[str, dic
         diagnostics["latest_hr"] = fields
         if len(diagnostics["hr_updates"]) < MAX_FIRMWARE_HR_EVENTS:
             diagnostics["hr_updates"].append(fields)
+        return
+
+    if status_type == "motion":
+        diagnostics["latest_motion"] = fields
+        if len(diagnostics["motion_updates"]) < MAX_FIRMWARE_MOTION_EVENTS:
+            diagnostics["motion_updates"].append(fields)
         return
 
     if status_type != "warning":
@@ -1229,6 +1253,11 @@ def build_metadata(
         "output_imu_csv_path": str(imu_csv_path) if imu_csv_path is not None else None,
         "posture": args.posture,
         "sensor_location": args.sensor_location,
+        "ppg_profile": getattr(args, "ppg_profile", "finger"),
+        "ppg_orientation": getattr(args, "ppg_orientation", ""),
+        "ppg_mounting_method": getattr(args, "mounting_method", ""),
+        "ppg_strap_tension": getattr(args, "strap_tension", ""),
+        "ppg_led_current_ma": getattr(args, "led_current_ma", None),
         "cuff_arm": args.cuff_arm,
         "ppg_hand": args.ppg_hand,
         "imu_sensor_model": "ADXL345",
@@ -1314,6 +1343,9 @@ def build_metadata(
         update.get("status") == "stable" and isinstance(update.get("bpm"), (int, float))
         for update in firmware_diagnostics["hr_updates"]
     )
+    metadata["firmware_latest_motion"] = firmware_diagnostics["latest_motion"] or None
+    metadata["firmware_motion_updates"] = firmware_diagnostics["motion_updates"]
+    metadata["firmware_motion_update_count"] = len(firmware_diagnostics["motion_updates"])
     metadata["firmware_warning_events"] = firmware_diagnostics["warning_events"]
 
     return metadata
