@@ -103,6 +103,18 @@ python tools\view_live_hr.py --port COM3 --baud 115200 --refresh 1
 
 Press `Ctrl+C` to exit. Use `tools\collect_ppg.py` instead whenever the session must be saved for analysis; the presentation viewer and collector cannot use the same COM port simultaneously.
 
+## Live Upper-Arm HR Preview
+
+The firmware live-HR algorithm remains finger-specific. For an experimental rolling upper-arm estimate, close `idf.py monitor`, the collector, and the finger viewer, then run the separate PC viewer with the same Anaconda environment used for upper-arm analysis:
+
+```powershell
+& "C:\wjw\Anaconda\python.exe" tools\view_live_upper_arm_hr.py --port COM5
+```
+
+Mount the MAX30102 and ADXL345 in the validated upper-arm arrangement and remain still. The viewer ignores firmware finger BPM, keeps a bounded 60-second PPG buffer, and applies the conservative upper-arm analysis every five seconds. The first possible estimate requires approximately 40 seconds of uninterrupted `Still` data; poor contact or ambiguous waveform quality can make the warm-up longer. Movement immediately hides BPM and restarts the still-data buffer when motion ends.
+
+Only a `Stable` state displays BPM. Motion, stale IMU updates, contact artifacts, timing errors, poor waveform quality, and ambiguous estimates display `--`. The viewer hides raw rows and saves no files. Use `tools\collect_ppg.py` for every recording that must be retained or compared with a cuff result. This PC preview is a single-participant feasibility feature, not validated firmware HR or a medical measurement.
+
 ## Calibrate Still/Moving
 
 Motion classification is disabled safely by default: `CONFIG_MOTION_THRESHOLD_MG=0` makes firmware report `calibrating`. BPM is never suppressed in this milestone.
@@ -251,11 +263,32 @@ Optional filters and diagnostics:
 python tools\analyze_trials.py --input-dir data\raw --session omron_pilot_001 --subject test --make-plots --verbose
 ```
 
+The offline upper-arm profile uses SciPy. Install it in the same Python environment as the collector if needed:
+
+```powershell
+python -m pip install scipy
+```
+
+Reference labels created by `--prompt-labels` are joined without modifying the raw CSV or metadata files. The default label folder is `data\labels`; it can be changed with `--labels-dir`. For the current upper-arm development session:
+
+```powershell
+python tools\analyze_trials.py `
+  --input-dir data\raw `
+  --session upper_arm_hr_validation_001 `
+  --labels-dir data\labels `
+  --output-dir data\processed `
+  --make-plots
+```
+
 The analyzer is for pilot data validation only. It does not train a blood pressure model and does not predict BP. It reads the raw CSV and matching metadata JSON files, then writes:
 
 - `data/processed/<session_id>/session_summary.csv`
 - `data/processed/<session_id>/session_summary.json`
 - `data/processed/<session_id>/plots/<trial_id>_ir_peaks.png` when `--make-plots` is used
+- `data/processed/<session_id>/upper_arm_window_analysis.json` for upper-arm window estimates and rejection reasons
+- `data/processed/<session_id>/upper_arm_interval_annotations.csv` for automatically detected clean, moving, contact, poor-contact, and uncertain intervals
+
+When metadata specifies `ppg_profile=upper_arm_experimental`, the analyzer uses a separate conservative 0.7-3 Hz upper-arm method. It rejects motion and contact steps, compares spectral, autocorrelation, and pulse-interval estimates, and leaves the HR blank when the result is ambiguous. Contact annotations marked `pending_manual_review` should be checked against the diagnostic plot. These outputs are development results, not validated live HR or blood-pressure predictions.
 
 `analysis_quality` is a practical triage label:
 
