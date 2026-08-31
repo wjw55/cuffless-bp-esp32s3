@@ -7,6 +7,7 @@ It does not train a model or predict blood pressure.
 from __future__ import annotations
 
 import argparse
+import csv
 import json
 import math
 from dataclasses import dataclass
@@ -16,6 +17,8 @@ from typing import Any
 
 import numpy as np
 import pandas as pd
+
+from upper_arm_hr import UpperArmResult, analyze_upper_arm_ppg, mask_to_intervals, profile_parameters
 
 
 RAW_COLUMNS = ["sample_seq", "timestamp_ms", "red", "ir"]
@@ -28,6 +31,7 @@ SUMMARY_FIELDS = [
     "subject_id",
     "session_id",
     "trial_id",
+    "ppg_profile",
     "csv_file",
     "metadata_file",
     "systolic_mmHg",
@@ -35,6 +39,7 @@ SUMMARY_FIELDS = [
     "cuff_hr_bpm",
     "cuff_start_time_s",
     "cuff_reading_time_s",
+    "cuff_timing",
     "sample_count",
     "data_duration_seconds",
     "approximate_sampling_rate_hz",
@@ -82,8 +87,20 @@ SUMMARY_FIELDS = [
     "ir_max",
     "ir_span",
     "estimated_ppg_hr_bpm",
+    "ppg_hr_status",
+    "ppg_hr_status_reason",
     "num_detected_peaks",
     "hr_error_vs_cuff_bpm",
+    "upper_arm_clean_coverage_s",
+    "upper_arm_accepted_window_count",
+    "upper_arm_motion_rejection_fraction",
+    "upper_arm_contact_step_rejection_fraction",
+    "upper_arm_contact_step_threshold_counts",
+    "upper_arm_poor_contact_fraction",
+    "upper_arm_clipping_fraction",
+    "upper_arm_median_interval_cv",
+    "upper_arm_median_template_correlation",
+    "upper_arm_median_spectral_prominence",
     "live_hr_update_count",
     "live_hr_stable_update_count",
     "live_hr_mean_bpm",
@@ -111,6 +128,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--session", required=True, help="Session ID to analyze, for example omron_pilot_001")
     parser.add_argument("--subject", help="Optional subject ID filter")
     parser.add_argument("--output-dir", default="data/processed", help="Base output folder")
+    parser.add_argument(
+        "--labels-dir",
+        default="data/labels",
+        help="Folder containing <session>_labels.csv reference files, default data/labels",
+    )
     parser.add_argument("--make-plots", action="store_true", help="Save per-trial IR peak diagnostic plots")
     parser.add_argument(
         "--include-borderline",
@@ -222,6 +244,98 @@ def discover_trial_pairs(
         pairs.append(TrialPair(csv_path, None, metadata, problem))
 
     return pairs, problems
+
+
+LABEL_TO_METADATA = {
+    "sbp": "systolic_mmHg",
+    "dbp": "diastolic_mmHg",
+    "omron_hr": "cuff_hr_bpm",
+    "omron_timing": "cuff_timing",
+    "posture": "posture",
+    "ppg_location": "sensor_location",
+    "cuff_arm": "cuff_arm",
+    "notes": "reference_label_notes",
+}
+
+
+def _is_blank(value: Any) -> bool:
+    return value is None or (isinstance(value, float) and math.isnan(value)) or str(value).strip() == ""
+
+
+def _values_match(left: Any, right: Any) -> bool:
+    try:
+        return math.isclose(float(left), float(right), rel_tol=0.0, abs_tol=1e-9)
+    except (TypeError, ValueError):
+        return str(left).strip() == str(right).strip()
+
+
+def load_session_labels(labels_dir: Path, session_id: str) -> dict[tuple[str, str, str], dict[str, str]]:
+    labels_path = labels_dir / f"{session_id}_labels.csv"
+    if not labels_path.exists():
+        return {}
+
+    labels: dict[tuple[str, str, str], dict[str, str]] = {}
+    with labels_path.open(newline="", encoding="utf-8") as handle:
+        for row_number, row in enumerate(csv.DictReader(handle), start=2):
+            key = (
+                str(row.get("subject", "")).strip(),
+                str(row.get("session", "")).strip(),
+                str(row.get("trial_id", "")).strip(),
+            )
+            if not all(key):
+                raise ValueError(f"Incomplete label identity at {labels_path}:{row_number}")
+            if key in labels:
+                raise ValueError(
+                    f"Duplicate label for subject={key[0]}, session={key[1]}, trial_id={key[2]} "
+                    f"at {labels_path}:{row_number}"
+                )
+            labels[key] = {str(column): str(value) for column, value in row.items()}
+    return labels
+
+
+def join_reference_labels(
+    pairs: list[TrialPair],
+    labels_dir: Path,
+    session_id: str,
+) -> list[str]:
+    labels = load_session_labels(labels_dir, session_id)
+    joined: set[tuple[str, str, str]] = set()
+    problems: list[str] = []
+
+    for pair in pairs:
+        metadata = pair.metadata
+        key = (
+            str(metadata.get("subject_id", "")).strip(),
+            str(metadata.get("session_id", "")).strip(),
+            str(metadata.get("trial_id", "")).strip(),
+        )
+        label = labels.get(key)
+        if label is None:
+            continue
+        joined.add(key)
+        for label_field, metadata_field in LABEL_TO_METADATA.items():
+            label_value = label.get(label_field)
+            if _is_blank(label_value):
+                continue
+            metadata_value = metadata.get(metadata_field)
+            if not _is_blank(metadata_value) and not _values_match(metadata_value, label_value):
+                raise ValueError(
+                    f"Conflicting reference value for subject={key[0]}, session={key[1]}, "
+                    f"trial_id={key[2]}: metadata {metadata_field}={metadata_value!r}, "
+                    f"label {label_field}={label_value!r}"
+                )
+            if _is_blank(metadata_value):
+                if label_field in {"sbp", "dbp", "omron_hr"}:
+                    metadata[metadata_field] = float(label_value)
+                else:
+                    metadata[metadata_field] = label_value
+
+    for key in sorted(set(labels) - joined):
+        if key[1] == session_id:
+            problems.append(
+                f"Label has no matching raw trial: subject={key[0]}, session={key[1]}, trial_id={key[2]}"
+            )
+    return problems
 
 
 def get_number(metadata: dict[str, Any], key: str, fallback=None):
@@ -504,6 +618,7 @@ def empty_summary_row(pair: TrialPair, quality_reason: str) -> dict[str, Any]:
             "subject_id": metadata.get("subject_id"),
             "session_id": metadata.get("session_id"),
             "trial_id": metadata.get("trial_id"),
+            "ppg_profile": metadata.get("ppg_profile") or "finger",
             "csv_file": str(pair.csv_path) if pair.csv_path is not None else None,
             "metadata_file": str(pair.metadata_path) if pair.metadata_path is not None else None,
             "analysis_quality": "reject",
@@ -522,7 +637,18 @@ def build_summary_row(pair: TrialPair) -> dict[str, Any]:
     metadata = pair.metadata
     df = load_ppg_csv(pair.csv_path)
     csv_stats = compute_csv_sampling_stats(df)
-    estimated_hr, num_peaks, _peak_indices, _processed_ir = estimate_ppg_hr(df)
+    ppg_profile = str(metadata.get("ppg_profile") or "finger")
+    upper_arm_result: UpperArmResult | None = None
+    if ppg_profile == "upper_arm_experimental":
+        upper_arm_result = analyze_upper_arm_ppg(df, metadata)
+        estimated_hr = upper_arm_result.bpm
+        num_peaks = upper_arm_result.detected_peak_count
+        ppg_hr_status = upper_arm_result.status
+        ppg_hr_status_reason = upper_arm_result.status_reason
+    else:
+        estimated_hr, num_peaks, _peak_indices, _processed_ir = estimate_ppg_hr(df)
+        ppg_hr_status = "usable" if estimated_hr is not None else "insufficient_clean_data"
+        ppg_hr_status_reason = "finger profile estimator" if estimated_hr is not None else "finger HR unavailable"
 
     red_min = int(df["red"].min()) if len(df) else None
     red_max = int(df["red"].max()) if len(df) else None
@@ -530,12 +656,6 @@ def build_summary_row(pair: TrialPair) -> dict[str, Any]:
     ir_max = int(df["ir"].max()) if len(df) else None
     red_span = (red_max - red_min) if red_min is not None and red_max is not None else None
     ir_span = (ir_max - ir_min) if ir_min is not None and ir_max is not None else None
-
-    cuff_hr_bpm = metadata.get("cuff_hr_bpm")
-    hr_error = None
-    if cuff_hr_bpm is not None and estimated_hr is not None:
-        hr_error = round(float(estimated_hr) - float(cuff_hr_bpm), 2)
-    live_hr_summary = summarize_live_hr(metadata, estimated_hr, cuff_hr_bpm)
 
     missing_sample_sequences = get_number(metadata, "missing_sample_sequences", csv_stats["missing_sample_sequences"])
     timing_stats = {
@@ -563,20 +683,52 @@ def build_summary_row(pair: TrialPair) -> dict[str, Any]:
     metadata_warnings = metadata_warnings_to_list(metadata.get("warnings"))
     effective_warnings, ignored_legacy_warnings = split_effective_warnings(timing_quality, metadata_warnings)
 
-    analysis_quality, analysis_reason = classify_analysis_quality(
-        timing_quality=timing_quality,
-        missing_sample_sequences=missing_sample_sequences,
-        num_detected_peaks=num_peaks,
-        estimated_ppg_hr_bpm=estimated_hr,
-        hr_error_vs_cuff_bpm=hr_error,
-        ir_span=ir_span,
-        metadata_warnings=effective_warnings,
-    )
+    if upper_arm_result is not None:
+        invalid_timing_reasons: list[str] = []
+        if timing_quality == "reject" or (missing_sample_sequences is not None and int(missing_sample_sequences) > 0):
+            invalid_timing_reasons.append("PPG timing rejected or samples missing")
+        for field in (
+            "firmware_fifo_overflow_count",
+            "firmware_i2c_error_count",
+            "imu_firmware_fifo_overflow_count",
+            "imu_firmware_i2c_error_count",
+        ):
+            value = metadata.get(field)
+            if value not in (None, "") and int(value) > 0:
+                invalid_timing_reasons.append(f"{field}={value}")
+        if invalid_timing_reasons:
+            estimated_hr = None
+            ppg_hr_status = "invalid_timing"
+            ppg_hr_status_reason = "; ".join(invalid_timing_reasons)
+
+    cuff_hr_bpm = metadata.get("cuff_hr_bpm")
+    hr_error = None
+    if cuff_hr_bpm is not None and estimated_hr is not None:
+        hr_error = round(float(estimated_hr) - float(cuff_hr_bpm), 2)
+    live_hr_summary = summarize_live_hr(metadata, estimated_hr, cuff_hr_bpm)
+
+    if upper_arm_result is not None:
+        analysis_quality = "usable" if ppg_hr_status == "usable" else "reject"
+        analysis_reason = ppg_hr_status_reason
+        if analysis_quality == "usable" and effective_warnings:
+            analysis_quality = "borderline"
+            analysis_reason += "; metadata warnings present"
+    else:
+        analysis_quality, analysis_reason = classify_analysis_quality(
+            timing_quality=timing_quality,
+            missing_sample_sequences=missing_sample_sequences,
+            num_detected_peaks=num_peaks,
+            estimated_ppg_hr_bpm=estimated_hr,
+            hr_error_vs_cuff_bpm=hr_error,
+            ir_span=ir_span,
+            metadata_warnings=effective_warnings,
+        )
 
     row = {
         "subject_id": metadata.get("subject_id"),
         "session_id": metadata.get("session_id"),
         "trial_id": metadata.get("trial_id"),
+        "ppg_profile": ppg_profile,
         "csv_file": str(pair.csv_path),
         "metadata_file": str(pair.metadata_path),
         "systolic_mmHg": metadata.get("systolic_mmHg"),
@@ -584,6 +736,7 @@ def build_summary_row(pair: TrialPair) -> dict[str, Any]:
         "cuff_hr_bpm": cuff_hr_bpm,
         "cuff_start_time_s": metadata.get("cuff_start_time_s"),
         "cuff_reading_time_s": metadata.get("cuff_reading_time_s"),
+        "cuff_timing": metadata.get("cuff_timing"),
         "sample_count": get_number(metadata, "sample_count", csv_stats["sample_count"]),
         "data_duration_seconds": get_number(metadata, "data_duration_seconds", csv_stats["data_duration_seconds"]),
         "approximate_sampling_rate_hz": get_number(
@@ -651,8 +804,28 @@ def build_summary_row(pair: TrialPair) -> dict[str, Any]:
         "ir_max": ir_max,
         "ir_span": ir_span,
         "estimated_ppg_hr_bpm": estimated_hr,
+        "ppg_hr_status": ppg_hr_status,
+        "ppg_hr_status_reason": ppg_hr_status_reason,
         "num_detected_peaks": num_peaks,
         "hr_error_vs_cuff_bpm": hr_error,
+        "upper_arm_clean_coverage_s": upper_arm_result.clean_coverage_s if upper_arm_result else None,
+        "upper_arm_accepted_window_count": upper_arm_result.accepted_window_count if upper_arm_result else None,
+        "upper_arm_motion_rejection_fraction": upper_arm_result.motion_fraction if upper_arm_result else None,
+        "upper_arm_contact_step_rejection_fraction": (
+            upper_arm_result.contact_step_fraction if upper_arm_result else None
+        ),
+        "upper_arm_contact_step_threshold_counts": (
+            upper_arm_result.contact_step_threshold_counts if upper_arm_result else None
+        ),
+        "upper_arm_poor_contact_fraction": upper_arm_result.poor_contact_fraction if upper_arm_result else None,
+        "upper_arm_clipping_fraction": upper_arm_result.clipping_fraction if upper_arm_result else None,
+        "upper_arm_median_interval_cv": upper_arm_result.median_interval_cv if upper_arm_result else None,
+        "upper_arm_median_template_correlation": (
+            upper_arm_result.median_template_correlation if upper_arm_result else None
+        ),
+        "upper_arm_median_spectral_prominence": (
+            upper_arm_result.median_spectral_prominence if upper_arm_result else None
+        ),
         "analysis_quality": analysis_quality,
         "analysis_quality_reason": analysis_reason,
     }
@@ -670,8 +843,95 @@ def save_peak_plot(pair: TrialPair, row: dict[str, Any], plot_path: Path) -> Non
     import matplotlib.pyplot as plt
 
     df = load_ppg_csv(pair.csv_path)
-    hr_bpm, _num_peaks, peak_indices, processed_ir = estimate_ppg_hr(df)
     time_s = (df["timestamp_ms"].astype(float).to_numpy() - float(df["timestamp_ms"].iloc[0])) / 1000.0
+
+    if str(pair.metadata.get("ppg_profile") or "finger") == "upper_arm_experimental":
+        result = analyze_upper_arm_ppg(df, pair.metadata)
+        fig, axes = plt.subplots(3, 1, figsize=(12, 9), sharex=True)
+        raw_ir = df["ir"].to_numpy(dtype=float)
+        axes[0].plot(time_s, raw_ir, linewidth=0.7, color="tab:blue", label="Raw IR")
+
+        def shade(mask: np.ndarray, color: str, label: str) -> None:
+            if np.any(mask):
+                axes[0].fill_between(
+                    time_s,
+                    np.nanmin(raw_ir),
+                    np.nanmax(raw_ir),
+                    where=mask,
+                    color=color,
+                    alpha=0.22,
+                    label=label,
+                )
+
+        shade(result.motion_mask, "tab:orange", "Moving + margin")
+        shade(result.contact_step_mask, "tab:red", "Contact step + margin")
+        shade(result.poor_contact_mask | result.clipping_mask, "tab:purple", "Poor contact/clipping")
+        axes[0].set_ylabel("Raw IR counts")
+        axes[0].legend(loc="upper right", ncol=2)
+        axes[0].grid(True, alpha=0.25)
+
+        axes[1].plot(time_s, result.processed_ir, linewidth=0.8, color="tab:blue", label="0.7-3 Hz IR")
+        accepted_peak_indices = sorted(
+            {
+                index
+                for window in result.windows
+                if window.status == "accepted"
+                for index in window.peak_indices
+            }
+        )
+        if accepted_peak_indices:
+            indices = np.asarray(accepted_peak_indices, dtype=int)
+            axes[1].scatter(
+                time_s[indices],
+                result.processed_ir[indices],
+                s=10,
+                color="tab:green",
+                label="Accepted-window peaks",
+            )
+        axes[1].set_ylabel("Filtered IR")
+        axes[1].legend(loc="upper right")
+        axes[1].grid(True, alpha=0.25)
+
+        for window in result.windows:
+            center = (window.start_s + window.end_s) / 2.0
+            if window.bpm is not None:
+                axes[2].scatter(center, window.bpm, color="tab:green", marker="o", s=35)
+            else:
+                method_values = [
+                    value
+                    for value in (window.spectral_bpm, window.autocorrelation_bpm, window.peak_bpm)
+                    if value is not None
+                ]
+                if method_values:
+                    axes[2].scatter(
+                        [center] * len(method_values),
+                        method_values,
+                        color="tab:gray",
+                        marker="x",
+                        s=22,
+                    )
+        if result.bpm is not None:
+            axes[2].axhline(result.bpm, color="tab:green", linewidth=1.2, label="Upper-arm consensus")
+        cuff_hr = row.get("cuff_hr_bpm")
+        if cuff_hr is not None:
+            axes[2].axhline(float(cuff_hr), color="tab:red", linestyle="--", linewidth=1.1, label="Reference HR")
+        axes[2].set_ylim(MIN_HR_BPM - 5, MAX_HR_BPM + 5)
+        axes[2].set_ylabel("Window HR (bpm)")
+        axes[2].set_xlabel("Time (s)")
+        axes[2].grid(True, alpha=0.25)
+        handles, labels = axes[2].get_legend_handles_labels()
+        if handles:
+            axes[2].legend(loc="upper right")
+        fig.suptitle(
+            f"{row.get('trial_id')} | Upper-arm HR={result.bpm if result.bpm is not None else 'n/a'} | "
+            f"{result.status}: {result.status_reason}"
+        )
+        fig.tight_layout()
+        fig.savefig(plot_path, dpi=150)
+        plt.close(fig)
+        return
+
+    hr_bpm, _num_peaks, peak_indices, processed_ir = estimate_ppg_hr(df)
 
     fig, ax = plt.subplots(figsize=(10, 4))
     ax.plot(time_s, processed_ir, linewidth=0.8, label="IR baseline removed")
@@ -689,6 +949,64 @@ def save_peak_plot(pair: TrialPair, row: dict[str, Any], plot_path: Path) -> Non
     fig.tight_layout()
     fig.savefig(plot_path, dpi=150)
     plt.close(fig)
+
+
+def build_upper_arm_details(
+    pairs: list[TrialPair],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    trial_details: list[dict[str, Any]] = []
+    annotations: list[dict[str, Any]] = []
+    for pair in pairs:
+        if pair.csv_path is None or pair.metadata_path is None:
+            continue
+        if str(pair.metadata.get("ppg_profile") or "finger") != "upper_arm_experimental":
+            continue
+        df = load_ppg_csv(pair.csv_path)
+        result = analyze_upper_arm_ppg(df, pair.metadata)
+        identity = {
+            "subject_id": pair.metadata.get("subject_id"),
+            "session_id": pair.metadata.get("session_id"),
+            "trial_id": pair.metadata.get("trial_id"),
+        }
+        trial_details.append(
+            {
+                **identity,
+                "profile": "upper_arm_experimental",
+                "bpm": result.bpm,
+                "status": result.status,
+                "status_reason": result.status_reason,
+                "accepted_window_count": result.accepted_window_count,
+                "clean_coverage_s": result.clean_coverage_s,
+                "motion_fraction": result.motion_fraction,
+                "contact_step_fraction": result.contact_step_fraction,
+                "contact_step_threshold_counts": result.contact_step_threshold_counts,
+                "poor_contact_fraction": result.poor_contact_fraction,
+                "clipping_fraction": result.clipping_fraction,
+                "windows": [window.as_dict() for window in result.windows],
+            }
+        )
+        interval_groups = [
+            (result.usable_mask, "clean", "automatic_quality_masks"),
+            (result.motion_mask, "moving", "firmware_motion_status"),
+            (result.contact_step_mask, "contact_step", "automatic_raw_ir_step_detector"),
+            (result.poor_contact_mask | result.clipping_mask, "poor_contact", "automatic_contact_gate"),
+        ]
+        for mask, category, source in interval_groups:
+            for interval in mask_to_intervals(result.time_s, mask, category, source):
+                annotations.append({**identity, **interval})
+        for window in result.windows:
+            if window.status == "poor_waveform_quality":
+                annotations.append(
+                    {
+                        **identity,
+                        "start_s": round(window.start_s, 3),
+                        "end_s": round(window.end_s, 3),
+                        "category": "uncertain",
+                        "source": "upper_arm_window_quality",
+                        "review_status": "pending_manual_review",
+                    }
+                )
+    return trial_details, annotations
 
 
 def rows_to_jsonable(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -740,6 +1058,29 @@ def summarize_live_hr_validation(rows: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
+def summarize_upper_arm_development(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    development_rows = [row for row in rows if row.get("ppg_profile") == "upper_arm_experimental"]
+    numeric_rows = [
+        row
+        for row in development_rows
+        if row.get("estimated_ppg_hr_bpm") is not None and row.get("cuff_hr_bpm") is not None
+    ]
+    absolute_errors = [abs(float(row["hr_error_vs_cuff_bpm"])) for row in numeric_rows]
+    within_five = sum(error <= 5.0 for error in absolute_errors)
+    no_gross_accepted_errors = bool(numeric_rows) and all(error <= 10.0 for error in absolute_errors)
+    passes = len(development_rows) >= 3 and within_five >= 2 and no_gross_accepted_errors
+    return {
+        "development_only": True,
+        "trial_count": len(development_rows),
+        "trials_with_numeric_hr_and_reference": len(numeric_rows),
+        "trials_within_5_bpm": within_five,
+        "maximum_accepted_absolute_error_bpm": round(max(absolute_errors), 2) if absolute_errors else None,
+        "no_accepted_error_over_10_bpm": no_gross_accepted_errors,
+        "passes_development_acceptance": passes,
+        "validation_claim_allowed": False,
+    }
+
+
 def print_console_summary(
     session_id: str,
     rows: list[dict[str, Any]],
@@ -749,6 +1090,7 @@ def print_console_summary(
     include_borderline: bool,
     verbose: bool,
     live_hr_validation: dict[str, Any],
+    upper_arm_development: dict[str, Any],
 ) -> None:
     usable_count = sum(row.get("analysis_quality") == "usable" for row in rows)
     borderline_count = sum(row.get("analysis_quality") == "borderline" for row in rows)
@@ -785,6 +1127,13 @@ def print_console_summary(
     print(f"- trials compared with cuff HR: {live_hr_validation['trials_with_cuff_comparison']}")
     print(f"- mean trial MAE vs cuff HR: {live_hr_validation['mean_trial_mae_vs_cuff_bpm']}")
     print(f"- max live update error vs cuff HR: {live_hr_validation['max_update_error_vs_cuff_bpm']}")
+    if upper_arm_development["trial_count"]:
+        print()
+        print("Upper-arm offline HR development (not validation):")
+        print(f"- numeric HR results: {upper_arm_development['trials_with_numeric_hr_and_reference']}")
+        print(f"- results within 5 bpm: {upper_arm_development['trials_within_5_bpm']}")
+        print(f"- max accepted absolute error: {upper_arm_development['maximum_accepted_absolute_error_bpm']}")
+        print(f"- development acceptance passed: {upper_arm_development['passes_development_acceptance']}")
     print()
     print("Saved:")
     print(f"- {summary_csv_path}")
@@ -798,12 +1147,46 @@ def main(argv: list[str] | None = None) -> int:
     output_session_dir.mkdir(parents=True, exist_ok=True)
 
     pairs, problems = discover_trial_pairs(input_dir, args.session, args.subject)
+    try:
+        problems.extend(join_reference_labels(pairs, Path(args.labels_dir), args.session))
+    except ValueError as exc:
+        print(f"ERROR: {exc}")
+        return 2
     rows = [build_summary_row(pair) for pair in pairs]
     live_hr_validation = summarize_live_hr_validation(rows)
+    upper_arm_development = summarize_upper_arm_development(rows)
+    upper_arm_details, interval_annotations = build_upper_arm_details(pairs)
 
     summary_csv_path = output_session_dir / "session_summary.csv"
     summary_json_path = output_session_dir / "session_summary.json"
+    window_details_path = output_session_dir / "upper_arm_window_analysis.json"
+    interval_annotations_path = output_session_dir / "upper_arm_interval_annotations.csv"
     pd.DataFrame(rows, columns=SUMMARY_FIELDS).to_csv(summary_csv_path, index=False)
+    if upper_arm_details:
+        window_details_path.write_text(
+            json.dumps(
+                {
+                    "session_id": args.session,
+                    "development_only": True,
+                    "profile_parameters": profile_parameters(),
+                    "trials": upper_arm_details,
+                },
+                indent=2,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        annotation_fields = [
+            "subject_id",
+            "session_id",
+            "trial_id",
+            "start_s",
+            "end_s",
+            "category",
+            "source",
+            "review_status",
+        ]
+        pd.DataFrame(interval_annotations, columns=annotation_fields).to_csv(interval_annotations_path, index=False)
 
     if args.make_plots:
         plots_dir = output_session_dir / "plots"
@@ -825,6 +1208,10 @@ def main(argv: list[str] | None = None) -> int:
             "reject": sum(row.get("analysis_quality") == "reject" for row in rows),
         },
         "live_hr_validation": live_hr_validation,
+        "upper_arm_offline_hr_development": upper_arm_development,
+        "upper_arm_profile_parameters": profile_parameters() if upper_arm_details else None,
+        "upper_arm_window_analysis_file": str(window_details_path) if upper_arm_details else None,
+        "upper_arm_interval_annotations_file": str(interval_annotations_path) if upper_arm_details else None,
     }
     summary_json_path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
 
@@ -837,6 +1224,7 @@ def main(argv: list[str] | None = None) -> int:
         args.include_borderline,
         args.verbose,
         live_hr_validation,
+        upper_arm_development,
     )
     return 0
 

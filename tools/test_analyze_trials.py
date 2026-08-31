@@ -16,9 +16,11 @@ from analyze_trials import (
     discover_trial_pairs,
     estimate_ppg_hr,
     infer_timing_quality,
+    join_reference_labels,
     summarize_live_hr,
     summarize_live_hr_validation,
 )
+from upper_arm_hr import analyze_upper_arm_ppg, build_contact_masks
 
 
 def make_ppg_df(duration_s=20, hr_bpm=72, sample_rate_hz=100, amplitude=10000):
@@ -94,6 +96,132 @@ def write_trial(input_dir: Path, metadata: dict, df=None, write_csv=True, write_
 
 
 class AnalyzeTrialsTests(unittest.TestCase):
+    def test_joins_external_reference_labels_without_changing_source_files(self):
+        with TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            input_dir = root / "raw"
+            labels_dir = root / "labels"
+            input_dir.mkdir()
+            labels_dir.mkdir()
+            write_trial(
+                input_dir,
+                make_metadata(systolic_mmHg=None, diastolic_mmHg=None, cuff_hr_bpm=None),
+            )
+            pd.DataFrame(
+                [
+                    {
+                        "session": "omron_pilot_001",
+                        "trial_id": "omron_001",
+                        "subject": "test",
+                        "sbp": 118,
+                        "dbp": 76,
+                        "omron_hr": 72,
+                        "omron_timing": "after_ppg",
+                    }
+                ]
+            ).to_csv(labels_dir / "omron_pilot_001_labels.csv", index=False)
+            pairs, _ = discover_trial_pairs(input_dir, "omron_pilot_001")
+
+            problems = join_reference_labels(pairs, labels_dir, "omron_pilot_001")
+
+            self.assertEqual(problems, [])
+            self.assertEqual(pairs[0].metadata["cuff_hr_bpm"], 72.0)
+            self.assertEqual(pairs[0].metadata["cuff_timing"], "after_ppg")
+            original = json.loads(pairs[0].metadata_path.read_text(encoding="utf-8"))
+            self.assertIsNone(original["cuff_hr_bpm"])
+
+    def test_conflicting_reference_label_raises_error(self):
+        with TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            input_dir = root / "raw"
+            labels_dir = root / "labels"
+            input_dir.mkdir()
+            labels_dir.mkdir()
+            write_trial(input_dir, make_metadata(cuff_hr_bpm=72))
+            pd.DataFrame(
+                [
+                    {
+                        "session": "omron_pilot_001",
+                        "trial_id": "omron_001",
+                        "subject": "test",
+                        "omron_hr": 80,
+                    }
+                ]
+            ).to_csv(labels_dir / "omron_pilot_001_labels.csv", index=False)
+            pairs, _ = discover_trial_pairs(input_dir, "omron_pilot_001")
+
+            with self.assertRaisesRegex(ValueError, "Conflicting reference value"):
+                join_reference_labels(pairs, labels_dir, "omron_pilot_001")
+
+    def test_upper_arm_profile_estimates_clean_synthetic_hr(self):
+        df = make_ppg_df(duration_s=90, hr_bpm=78, amplitude=6000)
+        metadata = make_metadata(ppg_profile="upper_arm_experimental", firmware_motion_updates=[])
+
+        result = analyze_upper_arm_ppg(df, metadata)
+
+        self.assertEqual(result.status, "usable")
+        self.assertIsNotNone(result.bpm)
+        self.assertLess(abs(result.bpm - 78), 3)
+        self.assertGreaterEqual(result.accepted_window_count, 3)
+
+    def test_upper_arm_profile_rejects_motion_contaminated_windows(self):
+        df = make_ppg_df(duration_s=90, hr_bpm=78, amplitude=6000)
+        updates = [
+            {"timestamp_ms": second * 1000, "status": "moving", "activity_g": 0.1}
+            for second in range(90)
+        ]
+        result = analyze_upper_arm_ppg(
+            df,
+            make_metadata(ppg_profile="upper_arm_experimental", firmware_motion_updates=updates),
+        )
+
+        self.assertIsNone(result.bpm)
+        self.assertEqual(result.status, "motion_contaminated")
+        self.assertTrue(all(window.status == "motion_contaminated" for window in result.windows))
+
+    def test_upper_arm_profile_rejects_invalid_timing_and_fifo_errors(self):
+        df = make_ppg_df(duration_s=90, hr_bpm=78, amplitude=6000)
+        metadata = make_metadata(
+            ppg_profile="upper_arm_experimental",
+            firmware_motion_updates=[],
+            firmware_fifo_overflow_count=1,
+        )
+
+        result = analyze_upper_arm_ppg(df, metadata)
+
+        self.assertIsNone(result.bpm)
+        self.assertEqual(result.status, "invalid_timing")
+        self.assertIn("firmware_fifo_overflow_count=1", result.status_reason)
+
+    def test_contact_step_detector_marks_pressure_change_with_margins(self):
+        sample_rate_hz = 100
+        time_s = np.arange(3000) / sample_rate_hz
+        ir = np.full(3000, 100000.0)
+        ir[1500:] += 20000.0
+
+        contact_mask, poor_mask, clipping_mask, threshold = build_contact_masks(time_s, ir)
+
+        self.assertIsNotNone(threshold)
+        self.assertTrue(np.all(contact_mask[(time_s >= 13.0) & (time_s <= 17.0)]))
+        self.assertFalse(np.any(poor_mask))
+        self.assertFalse(np.any(clipping_mask))
+
+    def test_upper_arm_profile_returns_no_hr_for_two_competing_rates(self):
+        first = make_ppg_df(duration_s=45, hr_bpm=72, amplitude=6000)
+        second = make_ppg_df(duration_s=45, hr_bpm=102, amplitude=6000)
+        second = second.copy()
+        second["sample_seq"] += len(first)
+        second["timestamp_ms"] += int(first["timestamp_ms"].iloc[-1]) + 10
+        df = pd.concat([first, second], ignore_index=True)
+
+        result = analyze_upper_arm_ppg(
+            df,
+            make_metadata(ppg_profile="upper_arm_experimental", firmware_motion_updates=[]),
+        )
+
+        self.assertIsNone(result.bpm)
+        self.assertIn(result.status, {"ambiguous_hr", "poor_waveform_quality"})
+
     def test_summarizes_stable_live_hr_against_offline_and_cuff_references(self):
         metadata = {
             "firmware_hr_updates": [
