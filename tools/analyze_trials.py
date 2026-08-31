@@ -101,6 +101,7 @@ SUMMARY_FIELDS = [
     "upper_arm_median_interval_cv",
     "upper_arm_median_template_correlation",
     "upper_arm_median_spectral_prominence",
+    "live_hr_source",
     "live_hr_update_count",
     "live_hr_stable_update_count",
     "live_hr_mean_bpm",
@@ -578,7 +579,12 @@ def metadata_warnings_to_list(value: Any) -> list[str]:
 
 
 def summarize_live_hr(metadata: dict[str, Any], offline_hr_bpm: float | None, cuff_hr_bpm: float | None) -> dict[str, Any]:
-    updates = metadata.get("firmware_hr_updates")
+    if metadata.get("pc_upper_arm_live_validation_enabled"):
+        source = "pc_upper_arm_rolling"
+        updates = metadata.get("pc_upper_arm_live_updates")
+    else:
+        source = "firmware"
+        updates = metadata.get("firmware_hr_updates")
     if not isinstance(updates, list):
         updates = []
 
@@ -599,6 +605,7 @@ def summarize_live_hr(metadata: dict[str, Any], offline_hr_bpm: float | None, cu
     offline_mae, offline_max_error = errors(offline_hr_bpm)
     cuff_mae, cuff_max_error = errors(cuff_hr_bpm)
     return {
+        "live_hr_source": source,
         "live_hr_update_count": len(updates),
         "live_hr_stable_update_count": len(stable_bpms),
         "live_hr_mean_bpm": round(float(np.mean(stable_bpms)), 2) if stable_bpms else None,

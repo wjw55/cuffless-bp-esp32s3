@@ -12,6 +12,7 @@ from view_live_upper_arm_hr import (
     MINIMUM_ANALYSIS_SECONDS,
     UpperArmViewerState,
     buffer_duration_s,
+    build_validation_record,
     display_hr,
     maybe_analyze,
     parse_args,
@@ -120,6 +121,27 @@ class UpperArmViewerAnalysisTests(unittest.TestCase):
         self.assertEqual(display_hr(state, now=40.1), ("72.4", "Stable"))
         self.assertEqual(state.preview.accepted_windows, 3)
         self.assertEqual(state.preview.clean_coverage_s, 30.0)
+
+    def test_builds_machine_readable_stable_validation_snapshot(self):
+        state = UpperArmViewerState(started_at=0.0)
+        add_still_samples(state)
+        update_state_from_line(state, "# stats rate_hz=99.8 ovf=0 i2c_errors=0", now=40.0)
+        maybe_analyze(state, now=40.0, analyzer=lambda _df, _metadata: fake_result())
+
+        record = build_validation_record(state, now=40.2, elapsed_s=40.2)
+
+        self.assertEqual(record["status"], "stable")
+        self.assertEqual(record["bpm"], 72.4)
+        self.assertEqual(record["analysis_timestamp_ms"], 40000)
+        self.assertEqual(record["ppg_rate_hz"], 99.8)
+        self.assertEqual(record["ppg_i2c_errors"], 0)
+
+    def test_validation_screen_reports_that_data_is_saved(self):
+        state = UpperArmViewerState(started_at=0.0)
+        screen = render_screen(state, now=0.0, port="COM5", baud=115200, saving=True)
+
+        self.assertIn("are saved", screen)
+        self.assertNotIn("No data is being saved", screen)
 
     def test_rejects_numeric_consensus_when_recent_window_failed(self):
         state = UpperArmViewerState(started_at=0.0)

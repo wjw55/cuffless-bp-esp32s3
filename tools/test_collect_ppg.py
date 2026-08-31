@@ -194,6 +194,7 @@ def make_args(**overrides):
         "label_notes": "",
         "prompt_labels": False,
         "labels_dir": "data/labels",
+        "live_upper_arm_validation": False,
     }
     defaults.update(overrides)
     return Namespace(**defaults)
@@ -367,6 +368,33 @@ class MetadataTests(unittest.TestCase):
         self.assertEqual(metadata["firmware_hr_update_count"], 2)
         self.assertEqual(metadata["firmware_hr_stable_update_count"], 1)
         self.assertEqual(metadata["firmware_latest_hr"]["bpm"], 71.8)
+
+    def test_metadata_preserves_pc_upper_arm_validation_updates(self):
+        live_path = Path("data/raw/test_session_trial_live_hr.csv")
+        records = [
+            {"elapsed_s": 39.0, "bpm": None, "status": "warming_up"},
+            {"elapsed_s": 45.0, "bpm": 72.4, "status": "stable"},
+        ]
+        metadata = build_metadata(
+            make_args(
+                ppg_profile="upper_arm_experimental",
+                live_upper_arm_validation=True,
+            ),
+            make_summary(),
+            datetime(2026, 6, 7, 20, 0, tzinfo=timezone.utc),
+            interrupted=False,
+            ignored_lines=0,
+            zoom_start_s=0.0,
+            zoom_end_s=10.0,
+            live_hr_csv_path=live_path,
+            live_hr_records=records,
+        )
+
+        self.assertTrue(metadata["pc_upper_arm_live_validation_enabled"])
+        self.assertEqual(metadata["output_live_hr_csv_path"], str(live_path))
+        self.assertEqual(metadata["pc_upper_arm_live_update_count"], 2)
+        self.assertEqual(metadata["pc_upper_arm_live_stable_update_count"], 1)
+        self.assertEqual(metadata["pc_upper_arm_live_first_stable_elapsed_s"], 45.0)
 
     def test_metadata_preserves_motion_and_upper_arm_mounting_details(self):
         diagnostics = create_firmware_diagnostics()
@@ -766,6 +794,7 @@ class OutputPathTests(unittest.TestCase):
         self.assertEqual(trial_1["metadata"].name, "test_omron_pilot_001_omron_001_metadata.json")
         self.assertEqual(trial_1["plot"].name, "test_omron_pilot_001_omron_001_plot.png")
         self.assertEqual(trial_1["zoom_plot"].name, "test_omron_pilot_001_omron_001_zoom_plot.png")
+        self.assertEqual(trial_1["live_hr_csv"].name, "test_omron_pilot_001_omron_001_live_hr.csv")
 
     def test_existing_output_file_is_not_overwritten_by_default(self):
         with TemporaryDirectory() as tmpdir:
@@ -800,6 +829,42 @@ class OutputPathTests(unittest.TestCase):
         ])
 
         self.assertTrue(args.overwrite)
+
+    def test_parses_live_upper_arm_validation_mode(self):
+        args = parse_args([
+            "--port",
+            "COM5",
+            "--duration",
+            "90",
+            "--subject",
+            "test",
+            "--session",
+            "live_upper_arm_validation_001",
+            "--trial-id",
+            "validation_001",
+            "--ppg-profile",
+            "upper_arm_experimental",
+            "--live-upper-arm-validation",
+        ])
+
+        self.assertTrue(args.live_upper_arm_validation)
+
+    def test_live_upper_arm_validation_rejects_finger_profile(self):
+        stderr = StringIO()
+        with self.assertRaises(SystemExit), redirect_stderr(stderr):
+            parse_args([
+                "--port",
+                "COM5",
+                "--duration",
+                "90",
+                "--subject",
+                "test",
+                "--session",
+                "live_validation",
+                "--live-upper-arm-validation",
+            ])
+
+        self.assertIn("requires --ppg-profile upper_arm_experimental", stderr.getvalue())
 
 
 class TimestampDiagnosticsTests(unittest.TestCase):

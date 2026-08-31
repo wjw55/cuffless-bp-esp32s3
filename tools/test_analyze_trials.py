@@ -240,6 +240,28 @@ class AnalyzeTrialsTests(unittest.TestCase):
         self.assertEqual(summary["live_hr_mean_absolute_error_vs_offline_bpm"], 2.0)
         self.assertEqual(summary["live_hr_max_absolute_error_vs_cuff_bpm"], 3.0)
 
+    def test_upper_arm_validation_uses_pc_rolling_updates_not_firmware_finger_hr(self):
+        metadata = {
+            "pc_upper_arm_live_validation_enabled": True,
+            "pc_upper_arm_live_updates": [
+                {"elapsed_s": 40.0, "bpm": None, "status": "ambiguous_hr"},
+                {"elapsed_s": 45.0, "bpm": 72.0, "status": "stable"},
+                {"elapsed_s": 50.0, "bpm": 74.0, "status": "stable"},
+            ],
+            "firmware_hr_updates": [
+                {"timestamp_ms": 45000, "bpm": 150.0, "status": "stable", "beats": 6},
+            ],
+        }
+
+        summary = summarize_live_hr(metadata, offline_hr_bpm=73.0, cuff_hr_bpm=72.0)
+
+        self.assertEqual(summary["live_hr_source"], "pc_upper_arm_rolling")
+        self.assertEqual(summary["live_hr_update_count"], 3)
+        self.assertEqual(summary["live_hr_stable_update_count"], 2)
+        self.assertEqual(summary["live_hr_mean_bpm"], 73.0)
+        self.assertEqual(summary["live_hr_mean_absolute_error_vs_offline_bpm"], 1.0)
+        self.assertEqual(summary["live_hr_max_absolute_error_vs_cuff_bpm"], 2.0)
+
     def test_aggregates_live_hr_validation_across_trials(self):
         validation = summarize_live_hr_validation(
             [

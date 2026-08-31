@@ -33,6 +33,28 @@ RECENT_WINDOW_TOLERANCE_SECONDS = 1.5
 MAX_RECENT_WARNINGS = 3
 SERIAL_RECEIVE_BUFFER_BYTES = 65_536
 
+VALIDATION_COLUMNS = [
+    "elapsed_s",
+    "sensor_timestamp_ms",
+    "analysis_timestamp_ms",
+    "bpm",
+    "status",
+    "reason",
+    "analysis_age_s",
+    "still_buffer_s",
+    "accepted_windows",
+    "clean_coverage_s",
+    "beats",
+    "motion_status",
+    "motion_activity_g",
+    "ppg_rate_hz",
+    "imu_rate_hz",
+    "ppg_i2c_errors",
+    "ppg_fifo_overflows",
+    "imu_i2c_errors",
+    "imu_fifo_overflows",
+]
+
 STATUS_LABELS = {
     "waiting": "Waiting for PPG",
     "warming_up": "Warming up",
@@ -76,6 +98,7 @@ class UpperArmViewerState:
     last_line_at: float | None = None
     last_motion_at: float | None = None
     last_analysis_at: float | None = None
+    last_analysis_sensor_ms: int | None = None
     latest_motion: dict = field(default_factory=dict)
     ppg_stats: dict = field(default_factory=dict)
     imu_stats: dict = field(default_factory=dict)
@@ -136,6 +159,7 @@ def reset_ppg_buffer(state: UpperArmViewerState, status: str, reason: str) -> No
     state.ppg_samples.clear()
     state.motion_updates.clear()
     state.last_analysis_at = None
+    state.last_analysis_sensor_ms = None
     state.preview = PreviewResult(status=status, reason=reason)
 
 
@@ -274,6 +298,7 @@ def maybe_analyze(
         return False
 
     state.last_analysis_at = now
+    state.last_analysis_sensor_ms = state.ppg_samples[-1][1] if state.ppg_samples else None
     try:
         df, metadata = build_analysis_inputs(state)
         result = analyzer(df, metadata)
@@ -323,16 +348,55 @@ def connection_status(state: UpperArmViewerState, now: float) -> str:
     return "Receiving" if age <= CONNECTION_STALE_SECONDS else f"Stale ({age:.1f} s without data)"
 
 
-def display_hr(state: UpperArmViewerState, now: float) -> tuple[str, str]:
-    gate_status, _gate_reason = motion_gate(state, now)
+def effective_preview(state: UpperArmViewerState, now: float) -> tuple[str, float | None, str]:
+    """Return the quality-gated status and BPM that may be shown or recorded."""
+    gate_status, gate_reason = motion_gate(state, now)
     if gate_status is not None:
-        return "--", STATUS_LABELS[gate_status]
+        return gate_status, None, str(gate_reason)
     if state.preview.status == "stable" and state.last_analysis_at is not None:
         if now - state.last_analysis_at > ANALYSIS_STALE_SECONDS:
-            return "--", STATUS_LABELS["analysis_stale"]
+            return "analysis_stale", None, "rolling analysis update is stale"
         if state.preview.bpm is not None:
-            return f"{state.preview.bpm:.1f}", STATUS_LABELS["stable"]
-    return "--", STATUS_LABELS.get(state.preview.status, state.preview.status.replace("_", " ").title())
+            return "stable", float(state.preview.bpm), state.preview.reason
+    return state.preview.status, None, state.preview.reason
+
+
+def display_hr(state: UpperArmViewerState, now: float) -> tuple[str, str]:
+    status_key, bpm, _reason = effective_preview(state, now)
+    bpm_text = f"{bpm:.1f}" if bpm is not None else "--"
+    status_text = STATUS_LABELS.get(status_key, status_key.replace("_", " ").title())
+    return bpm_text, status_text
+
+
+def build_validation_record(state: UpperArmViewerState, now: float, elapsed_s: float) -> dict:
+    """Build one machine-readable rolling HR and signal-quality snapshot."""
+    status, bpm, reason = effective_preview(state, now)
+    latest_sensor_ms = state.ppg_samples[-1][1] if state.ppg_samples else None
+    motion_status = str(state.latest_motion.get("status", "")) or None
+    activity = state.latest_motion.get("activity_g")
+    analysis_age = None if state.last_analysis_at is None else max(0.0, now - state.last_analysis_at)
+    record = {
+        "elapsed_s": round(max(0.0, elapsed_s), 3),
+        "sensor_timestamp_ms": latest_sensor_ms,
+        "analysis_timestamp_ms": state.last_analysis_sensor_ms,
+        "bpm": round(bpm, 2) if bpm is not None else None,
+        "status": status,
+        "reason": reason,
+        "analysis_age_s": round(analysis_age, 3) if analysis_age is not None else None,
+        "still_buffer_s": round(buffer_duration_s(state), 3),
+        "accepted_windows": state.preview.accepted_windows,
+        "clean_coverage_s": state.preview.clean_coverage_s,
+        "beats": state.preview.beats,
+        "motion_status": motion_status,
+        "motion_activity_g": activity if isinstance(activity, (int, float)) else None,
+        "ppg_rate_hz": state.ppg_stats.get("rate_hz"),
+        "imu_rate_hz": state.imu_stats.get("rate_hz"),
+        "ppg_i2c_errors": state.ppg_stats.get("i2c_errors"),
+        "ppg_fifo_overflows": state.ppg_stats.get("ovf"),
+        "imu_i2c_errors": state.imu_stats.get("i2c_errors"),
+        "imu_fifo_overflows": state.imu_stats.get("fifo_overflows"),
+    }
+    return {column: record[column] for column in VALIDATION_COLUMNS}
 
 
 def motion_display(state: UpperArmViewerState, now: float) -> tuple[str, str]:
@@ -358,8 +422,16 @@ def age_text(last_update: float | None, now: float) -> str:
     return "waiting" if last_update is None else f"{max(0.0, now - last_update):.1f} s"
 
 
-def render_screen(state: UpperArmViewerState, now: float, port: str, baud: int) -> str:
-    bpm, status = display_hr(state, now)
+def render_screen(
+    state: UpperArmViewerState,
+    now: float,
+    port: str,
+    baud: int,
+    saving: bool = False,
+) -> str:
+    status_key, bpm_value, effective_reason = effective_preview(state, now)
+    bpm = f"{bpm_value:.1f}" if bpm_value is not None else "--"
+    status = STATUS_LABELS.get(status_key, status_key.replace("_", " ").title())
     motion, activity = motion_display(state, now)
     duration_s = buffer_duration_s(state)
     lines = [
@@ -368,7 +440,7 @@ def render_screen(state: UpperArmViewerState, now: float, port: str, baud: int) 
         "",
         f"                 BPM: {bpm}",
         f"              Status: {status}",
-        f"              Reason: {state.preview.reason}",
+        f"              Reason: {effective_reason}",
         f"       Analysis age: {age_text(state.last_analysis_at, now)}",
         f"       Still buffer: {duration_s:.1f} / {MINIMUM_ANALYSIS_SECONDS:.0f} s minimum",
         f"    Accepted windows: {state.preview.accepted_windows}",
@@ -386,12 +458,17 @@ def render_screen(state: UpperArmViewerState, now: float, port: str, baud: int) 
         "RECENT WARNINGS",
     ]
     lines.extend(f"- {warning}" for warning in state.warnings) if state.warnings else lines.append("- none")
+    save_message = (
+        "Validation mode: raw streams and rolling updates are saved; Ctrl+C stops early and saves."
+        if saving
+        else "Press Ctrl+C to exit. No data is being saved."
+    )
     lines.extend(
         [
             "",
             "PC rolling estimate; firmware finger BPM is ignored.",
             "Experimental single-participant feasibility preview, not a medical measurement.",
-            "Press Ctrl+C to exit. No data is being saved.",
+            save_message,
         ]
     )
     return "\n".join(lines)

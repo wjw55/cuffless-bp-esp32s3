@@ -115,6 +115,34 @@ Mount the MAX30102 and ADXL345 in the validated upper-arm arrangement and remain
 
 Only a `Stable` state displays BPM. Motion, stale IMU updates, contact artifacts, timing errors, poor waveform quality, and ambiguous estimates display `--`. The viewer hides raw rows and saves no files. Use `tools\collect_ppg.py` for every recording that must be retained or compared with a cuff result. This PC preview is a single-participant feasibility feature, not validated firmware HR or a medical measurement.
 
+### Record a Live Upper-Arm Validation Trial
+
+Use the collector's validation mode when the rolling display must be evaluated against saved raw data and an Omron label. It uses the same COM port for acquisition and preview, so no second terminal or serial connection is needed:
+
+```powershell
+& "C:\wjw\Anaconda\python.exe" tools\collect_ppg.py `
+  --port COM5 `
+  --duration 90 `
+  --subject test `
+  --session upper_arm_live_hr_validation_001 `
+  --trial-id validation_001 `
+  --posture seated `
+  --sensor-location left_outer_upper_arm_5cm_above_elbow `
+  --ppg-profile upper_arm_experimental `
+  --ppg-orientation leds_distal_photodiode_proximal `
+  --mounting-method opaque_elastic_strap_dark_foam `
+  --strap-tension mark_2 `
+  --led-current-ma 7.2 `
+  --imu-location left_upper_arm_adjacent_to_ppg `
+  --imu-orientation x_distal_y_left_z_outward `
+  --cuff-arm right `
+  --live-upper-arm-validation `
+  --prompt-labels `
+  --notes "PC rolling upper-arm HR validation"
+```
+
+Remain still throughout the recording and take the Omron measurement immediately afterward. Enter the prompted Omron HR (and BP values when available) with timing `after_ppg`. In addition to the normal PPG, IMU, metadata, and plot files, this mode saves `data/raw/<subject>_<session>_<trial>_live_hr.csv`. The extra CSV contains one-second rolling BPM/status snapshots, quality reasons, motion state, clean coverage, accepted-window counts, and sensor-health counters. The same records are summarized in metadata so `tools\analyze_trials.py` compares the PC rolling estimates—not the finger firmware estimates—with offline upper-arm HR and the Omron reference.
+
 ## Calibrate Still/Moving
 
 Motion classification is disabled safely by default: `CONFIG_MOTION_THRESHOLD_MG=0` makes firmware report `calibrating`. BPM is never suppressed in this milestone.

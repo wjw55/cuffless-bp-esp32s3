@@ -211,6 +211,14 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="When the Omron label was taken relative to PPG",
     )
     parser.add_argument("--label-notes", default="", help="Optional notes saved only in the labels CSV")
+    parser.add_argument(
+        "--live-upper-arm-validation",
+        action="store_true",
+        help=(
+            "Show and save PC rolling upper-arm HR/quality updates while preserving the normal "
+            "raw PPG, IMU, metadata, and plot outputs"
+        ),
+    )
     args = parser.parse_args(argv)
     return validate_collection_args(args, parser)
 
@@ -228,6 +236,12 @@ def validate_collection_args(args: argparse.Namespace, parser: argparse.Argument
             if parser is not None:
                 parser.error(message)
             raise SystemExit(f"ERROR: {message}")
+
+    if getattr(args, "live_upper_arm_validation", False) and args.ppg_profile != "upper_arm_experimental":
+        message = "--live-upper-arm-validation requires --ppg-profile upper_arm_experimental"
+        if parser is not None:
+            parser.error(message)
+        raise SystemExit(f"ERROR: {message}")
 
     return args
 
@@ -469,6 +483,7 @@ def build_output_paths(outdir: Path, subject: str, session: str, trial_id: str) 
     return {
         "csv": outdir / f"{prefix}_ppg.csv",
         "imu_csv": outdir / f"{prefix}_imu.csv",
+        "live_hr_csv": outdir / f"{prefix}_live_hr.csv",
         "metadata": outdir / f"{prefix}_metadata.json",
         "plot": outdir / f"{prefix}_plot.png",
         "zoom_plot": outdir / f"{prefix}_zoom_plot.png",
@@ -1205,6 +1220,8 @@ def build_metadata(
     firmware_diagnostics: dict | None = None,
     imu_summary: dict | None = None,
     imu_csv_path: Path | None = None,
+    live_hr_csv_path: Path | None = None,
+    live_hr_records: list[dict] | None = None,
 ) -> dict:
     firmware_diagnostics = firmware_diagnostics or create_firmware_diagnostics()
     imu_summary = imu_summary or {
@@ -1243,6 +1260,12 @@ def build_metadata(
         if not getattr(args, "imu_orientation", "").strip():
             imu_warnings.append("IMU samples were recorded without --imu-orientation metadata.")
 
+    live_hr_records = live_hr_records or []
+    stable_live_records = [
+        record
+        for record in live_hr_records
+        if record.get("status") == "stable" and isinstance(record.get("bpm"), (int, float))
+    ]
     metadata = {
         "subject_id": args.subject,
         "session_id": args.session,
@@ -1251,6 +1274,8 @@ def build_metadata(
         "output_csv_path": str(csv_path) if csv_path is not None else None,
         "output_imu_csv_filename": imu_csv_path.name if imu_csv_path is not None else None,
         "output_imu_csv_path": str(imu_csv_path) if imu_csv_path is not None else None,
+        "output_live_hr_csv_filename": live_hr_csv_path.name if live_hr_csv_path is not None else None,
+        "output_live_hr_csv_path": str(live_hr_csv_path) if live_hr_csv_path is not None else None,
         "posture": args.posture,
         "sensor_location": args.sensor_location,
         "ppg_profile": getattr(args, "ppg_profile", "finger"),
@@ -1304,6 +1329,15 @@ def build_metadata(
         "cuff_timestamp": args.cuff_timestamp or None,
         "prompt_bp_after": args.prompt_bp_after,
         "notes": args.notes,
+        "pc_upper_arm_live_validation_enabled": bool(
+            getattr(args, "live_upper_arm_validation", False)
+        ),
+        "pc_upper_arm_live_updates": live_hr_records,
+        "pc_upper_arm_live_update_count": len(live_hr_records),
+        "pc_upper_arm_live_stable_update_count": len(stable_live_records),
+        "pc_upper_arm_live_first_stable_elapsed_s": (
+            stable_live_records[0].get("elapsed_s") if stable_live_records else None
+        ),
         "interrupted": interrupted,
         "ignored_non_csv_lines": ignored_lines,
         "zoom_plot_start_seconds": zoom_start_s,
@@ -1363,6 +1397,17 @@ def main() -> int:
         return 1
 
     serial, pd, plt = import_dependencies()
+    live_viewer = None
+    if args.live_upper_arm_validation:
+        try:
+            import view_live_upper_arm_hr as live_viewer
+        except ImportError as exc:
+            print(
+                "ERROR: Live upper-arm validation requires NumPy, pandas, and SciPy in this "
+                f"Python environment.\nDetails: {exc}",
+                file=sys.stderr,
+            )
+            return 2
 
     outdir = Path(args.outdir)
     outdir.mkdir(parents=True, exist_ok=True)
@@ -1376,6 +1421,7 @@ def main() -> int:
 
     csv_path = output_paths["csv"]
     imu_csv_path = output_paths["imu_csv"]
+    live_hr_csv_path = output_paths["live_hr_csv"]
     metadata_path = output_paths["metadata"]
     plot_path = output_paths["plot"]
     zoom_plot_path = output_paths["zoom_plot"]
@@ -1386,35 +1432,75 @@ def main() -> int:
     ignored_lines = 0
     interrupted = False
     firmware_diagnostics = create_firmware_diagnostics()
+    live_hr_records: list[dict] = []
+    live_state = None
 
     print(f"Opening {args.port} at {args.baud} baud...")
     try:
         with serial.Serial(args.port, args.baud, timeout=1) as ser:
+            if live_viewer is not None:
+                try:
+                    ser.set_buffer_size(rx_size=live_viewer.SERIAL_RECEIVE_BUFFER_BYTES)
+                except (AttributeError, NotImplementedError, OSError):
+                    pass
             # Many ESP32 boards reset when the serial port opens. Give boot text time to pass.
             time.sleep(SERIAL_STARTUP_DELAY_S)
             ser.reset_input_buffer()
 
             recording_start = datetime.now().astimezone()
-            deadline = time.monotonic() + args.duration
+            recording_start_monotonic = time.monotonic()
+            deadline = recording_start_monotonic + args.duration
+            next_live_update = recording_start_monotonic
+            if live_viewer is not None:
+                live_state = live_viewer.UpperArmViewerState(started_at=recording_start_monotonic)
             print(f"Recording for {args.duration:.2f} s. Press Ctrl+C to stop early and save.")
 
             while time.monotonic() < deadline:
                 raw_line = ser.readline()
+                now = time.monotonic()
                 if not raw_line:
+                    if live_viewer is not None and live_state is not None and now >= next_live_update:
+                        live_viewer.maybe_analyze(live_state, now)
+                        live_hr_records.append(
+                            live_viewer.build_validation_record(
+                                live_state,
+                                now,
+                                now - recording_start_monotonic,
+                            )
+                        )
+                        live_viewer.clear_and_render(
+                            live_viewer.render_screen(live_state, now, args.port, args.baud, saving=True)
+                        )
+                        next_live_update = now + live_viewer.DEFAULT_REFRESH_SECONDS
                     continue
 
                 line = raw_line.decode("utf-8", errors="replace")
+                if live_viewer is not None and live_state is not None:
+                    live_viewer.update_state_from_line(live_state, line, now)
                 update_firmware_diagnostics(firmware_diagnostics, parse_firmware_status_line(line))
                 imu_row = parse_imu_row(line)
                 if imu_row is not None:
                     imu_rows.append(imu_row)
-                    continue
-                row = parse_ppg_row(line)
-                if row is None:
-                    ignored_lines += 1
-                    continue
+                else:
+                    row = parse_ppg_row(line)
+                    if row is None:
+                        ignored_lines += 1
+                    else:
+                        rows.append(row)
 
-                rows.append(row)
+                if live_viewer is not None and live_state is not None and now >= next_live_update:
+                    live_viewer.maybe_analyze(live_state, now)
+                    live_hr_records.append(
+                        live_viewer.build_validation_record(
+                            live_state,
+                            now,
+                            now - recording_start_monotonic,
+                        )
+                    )
+                    live_viewer.clear_and_render(
+                        live_viewer.render_screen(live_state, now, args.port, args.baud, saving=True)
+                    )
+                    next_live_update = now + live_viewer.DEFAULT_REFRESH_SECONDS
 
     except KeyboardInterrupt:
         interrupted = True
@@ -1433,6 +1519,9 @@ def main() -> int:
     imu_df = pd.DataFrame(imu_rows, columns=["imu_seq", "timestamp_ms", "x_raw", "y_raw", "z_raw"])
     df.to_csv(csv_path, index=False)
     imu_df.to_csv(imu_csv_path, index=False)
+    if live_viewer is not None:
+        live_hr_df = pd.DataFrame(live_hr_records, columns=live_viewer.VALIDATION_COLUMNS)
+        live_hr_df.to_csv(live_hr_csv_path, index=False)
 
     summary = summarize(df, args.duration)
     imu_summary = summarize_imu(imu_df, args.duration)
@@ -1457,6 +1546,8 @@ def main() -> int:
         firmware_diagnostics,
         imu_summary,
         imu_csv_path,
+        live_hr_csv_path if live_viewer is not None else None,
+        live_hr_records,
     )
     metadata_path.write_text(json.dumps(metadata, indent=2) + "\n", encoding="utf-8")
 
@@ -1490,6 +1581,10 @@ def main() -> int:
         zoom_start_s,
         zoom_end_s,
     )
+    if live_viewer is not None:
+        stable_update_count = sum(record.get("status") == "stable" for record in live_hr_records)
+        print(f"  live upper-arm HR CSV: {live_hr_csv_path}")
+        print(f"  live upper-arm updates: {len(live_hr_records)} ({stable_update_count} stable)")
 
     return 0
 
