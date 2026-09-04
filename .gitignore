@@ -19,6 +19,9 @@
 # Local measurement data
 data/raw/
 data/processed/
+data/external/
+data/models/
+data/labels/
 
 # Build artifacts and directories
 **/build/

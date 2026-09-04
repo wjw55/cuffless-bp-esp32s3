@@ -195,6 +195,8 @@ def make_args(**overrides):
         "prompt_labels": False,
         "labels_dir": "data/labels",
         "live_upper_arm_validation": False,
+        "live_bp_model_dir": None,
+        "allow_unvalidated": False,
     }
     defaults.update(overrides)
     return Namespace(**defaults)
@@ -795,6 +797,7 @@ class OutputPathTests(unittest.TestCase):
         self.assertEqual(trial_1["plot"].name, "test_omron_pilot_001_omron_001_plot.png")
         self.assertEqual(trial_1["zoom_plot"].name, "test_omron_pilot_001_omron_001_zoom_plot.png")
         self.assertEqual(trial_1["live_hr_csv"].name, "test_omron_pilot_001_omron_001_live_hr.csv")
+        self.assertEqual(trial_1["live_bp_csv"].name, "test_omron_pilot_001_omron_001_live_bp.csv")
 
     def test_existing_output_file_is_not_overwritten_by_default(self):
         with TemporaryDirectory() as tmpdir:
@@ -865,6 +868,56 @@ class OutputPathTests(unittest.TestCase):
             ])
 
         self.assertIn("requires --ppg-profile upper_arm_experimental", stderr.getvalue())
+
+    def test_parses_live_bp_capture_mode(self):
+        args = parse_args([
+            "--port",
+            "COM5",
+            "--duration",
+            "90",
+            "--subject",
+            "P001",
+            "--session",
+            "bp_live_validation_001",
+            "--trial-id",
+            "validation_001",
+            "--ppg-profile",
+            "upper_arm_experimental",
+            "--live-bp-model-dir",
+            "data/processed/bp/run/single_subject/P001",
+            "--allow-unvalidated",
+        ])
+
+        self.assertEqual(args.live_bp_model_dir, "data/processed/bp/run/single_subject/P001")
+        self.assertTrue(args.allow_unvalidated)
+
+    def test_live_bp_capture_requires_upper_arm_and_85_seconds(self):
+        invalid_cases = [
+            make_args(live_bp_model_dir="model"),
+            make_args(
+                ppg_profile="upper_arm_experimental",
+                live_bp_model_dir="model",
+                duration=84.9,
+            ),
+        ]
+
+        for args in invalid_cases:
+            with self.subTest(args=args), self.assertRaises(SystemExit):
+                validate_collection_args(args)
+
+    def test_live_bp_capture_is_mutually_exclusive_with_hr_capture(self):
+        with self.assertRaises(SystemExit):
+            validate_collection_args(
+                make_args(
+                    ppg_profile="upper_arm_experimental",
+                    live_bp_model_dir="model",
+                    live_upper_arm_validation=True,
+                )
+            )
+
+    def test_unvalidated_override_requires_a_bp_model(self):
+        with self.assertRaises(SystemExit):
+            validate_collection_args(make_args(allow_unvalidated=True))
 
 
 class TimestampDiagnosticsTests(unittest.TestCase):

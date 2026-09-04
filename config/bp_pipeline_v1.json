@@ -1,0 +1,65 @@
+{
+  "schema_version": 1,
+  "random_seed": 2026,
+  "output_root": "data/processed/bp",
+  "datasets": {
+    "one_month_wrist": {
+      "enabled": true,
+      "root": "data/external/one_month_wrist",
+      "source_url": "https://github.com/aistairc/One_Month_Wrist_PPG_Dataset.git",
+      "licence": "MIT repository licence",
+      "sensor_site": "wrist"
+    },
+    "ppg_bp": {
+      "enabled": true,
+      "root": "data/external/ppg_bp",
+      "source_url": "https://doi.org/10.6084/m9.figshare.5459299.v5",
+      "licence": "CC0",
+      "source_version": 5,
+      "expected_archive_md5": "3b8eae44f45799aeb3c5f55af8589828",
+      "sensor_site": "fingertip",
+      "optional": true
+    },
+    "local_upper_arm": {
+      "enabled": true,
+      "raw_dir": "data/raw",
+      "labels_dir": "data/labels",
+      "sensor_site": "upper_arm",
+      "licence": "locally collected with project consent/ethics requirements",
+      "required_profile": "upper_arm_experimental",
+      "optional": true
+    }
+  },
+  "signal": {
+    "window_seconds": 8.0,
+    "window_step_seconds": 4.0,
+    "bandpass_low_hz": 0.5,
+    "bandpass_high_hz": 8.0,
+    "filter_order": 4,
+    "template_samples": 128,
+    "minimum_hr_bpm": 40.0,
+    "maximum_hr_bpm": 180.0
+  },
+  "quality": {
+    "minimum_sample_completeness": 0.995,
+    "minimum_beats_per_window": 4,
+    "maximum_interval_cv": 0.2,
+    "minimum_template_correlation": 0.6,
+    "maximum_clipped_fraction": 0.005,
+    "minimum_accepted_windows_per_occasion": 3,
+    "local_contact_threshold_counts": 50000.0,
+    "motion_margin_seconds": 1.0,
+    "contact_margin_seconds": 2.0
+  },
+  "models": {
+    "outer_evaluation": "leave_one_participant_out",
+    "inner_max_splits": 3,
+    "bootstrap_iterations": 1000,
+    "ridge_alphas": [1.0, 10.0, 100.0],
+    "elastic_net_alphas": [0.3],
+    "elastic_net_l1_ratios": [0.5],
+    "hist_gradient_boosting_learning_rates": [0.05],
+    "hist_gradient_boosting_max_leaf_nodes": [5, 10],
+    "hist_gradient_boosting_min_samples_leaf": [5]
+  }
+}

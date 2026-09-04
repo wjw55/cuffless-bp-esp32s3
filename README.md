@@ -325,3 +325,46 @@ When metadata specifies `ppg_profile=upper_arm_experimental`, the analyzer uses 
 - `reject`: missing CSV/metadata, missing sample sequences, rejected timing, too few peaks, or no plausible PPG HR estimate.
 
 For future modeling, start with only `usable` trials. Review `borderline` trials manually with the generated peak plots before deciding whether to keep them.
+
+## Offline PPG-to-BP Research Pipeline
+
+The separate PC-side BP pipeline audits public and local datasets, extracts normalized pulse morphology, and evaluates one-time-calibrated SBP/DBP baselines with participant-level splits. It does not change firmware or claim medical accuracy.
+
+```powershell
+& "C:\wjw\Anaconda\python.exe" tools\bp_pipeline.py audit --config config\bp_pipeline_v1.json
+& "C:\wjw\Anaconda\python.exe" tools\bp_pipeline.py run --config config\bp_pipeline_v1.json
+```
+
+A separate retrospective single-participant command uses forward chronological development folds and locks the latest five or more occasions for final testing without changing the multi-participant evaluation:
+
+```powershell
+& "C:\wjw\Anaconda\python.exe" tools\bp_pipeline.py single-subject `
+  --config config\bp_pipeline_v1.json `
+  --participant-id P001 `
+  --run-dir data\processed\bp\<run_id>
+```
+
+See [docs/bp_pipeline.md](docs/bp_pipeline.md) for dataset locations, outputs, resume behavior, and interpretation rules.
+
+## Experimental PC BP Viewer
+
+The BP viewer is ready to run in safe pending mode before a model exists. It shows calibration, motion, signal quality, sensor health, and clean-buffer progress, but always keeps BP at `--/--`:
+
+```powershell
+& "C:\wjw\Anaconda\python.exe" tools\view_live_bp.py `
+  --port COM5 `
+  --participant-id P001 `
+  --calibration-sbp 116 `
+  --calibration-dbp 72
+```
+
+After `bp_pipeline.py single-subject` creates a model package, connect it without rebuilding the viewer:
+
+```powershell
+& "C:\wjw\Anaconda\python.exe" tools\view_live_bp.py `
+  --port COM5 `
+  --participant-id P001 `
+  --model-dir data\processed\bp\<run_id>\single_subject\P001
+```
+
+Numeric BP is enabled by default only if both SBP and DBP models beat the zero-change baseline on the locked test. `--allow-unvalidated` permits an explicitly labelled development estimate; it must not be presented as validated BP. See [docs/bp_pipeline.md](docs/bp_pipeline.md) for offline prediction and optional collector capture commands.

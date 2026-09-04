@@ -219,6 +219,15 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             "raw PPG, IMU, metadata, and plot outputs"
         ),
     )
+    parser.add_argument(
+        "--live-bp-model-dir",
+        help="Show and save quality-gated experimental BP updates using a saved single-subject model directory",
+    )
+    parser.add_argument(
+        "--allow-unvalidated",
+        action="store_true",
+        help="Allow an explicitly labelled unvalidated BP model during live BP validation",
+    )
     args = parser.parse_args(argv)
     return validate_collection_args(args, parser)
 
@@ -239,6 +248,28 @@ def validate_collection_args(args: argparse.Namespace, parser: argparse.Argument
 
     if getattr(args, "live_upper_arm_validation", False) and args.ppg_profile != "upper_arm_experimental":
         message = "--live-upper-arm-validation requires --ppg-profile upper_arm_experimental"
+        if parser is not None:
+            parser.error(message)
+        raise SystemExit(f"ERROR: {message}")
+
+    live_bp_model_dir = getattr(args, "live_bp_model_dir", None)
+    if live_bp_model_dir and args.ppg_profile != "upper_arm_experimental":
+        message = "--live-bp-model-dir requires --ppg-profile upper_arm_experimental"
+        if parser is not None:
+            parser.error(message)
+        raise SystemExit(f"ERROR: {message}")
+    if live_bp_model_dir and getattr(args, "live_upper_arm_validation", False):
+        message = "--live-bp-model-dir cannot be combined with --live-upper-arm-validation"
+        if parser is not None:
+            parser.error(message)
+        raise SystemExit(f"ERROR: {message}")
+    if getattr(args, "allow_unvalidated", False) and not live_bp_model_dir:
+        message = "--allow-unvalidated requires --live-bp-model-dir"
+        if parser is not None:
+            parser.error(message)
+        raise SystemExit(f"ERROR: {message}")
+    if live_bp_model_dir and args.duration < 85.0:
+        message = "--live-bp-model-dir requires --duration of at least 85 seconds"
         if parser is not None:
             parser.error(message)
         raise SystemExit(f"ERROR: {message}")
@@ -484,6 +515,7 @@ def build_output_paths(outdir: Path, subject: str, session: str, trial_id: str) 
         "csv": outdir / f"{prefix}_ppg.csv",
         "imu_csv": outdir / f"{prefix}_imu.csv",
         "live_hr_csv": outdir / f"{prefix}_live_hr.csv",
+        "live_bp_csv": outdir / f"{prefix}_live_bp.csv",
         "metadata": outdir / f"{prefix}_metadata.json",
         "plot": outdir / f"{prefix}_plot.png",
         "zoom_plot": outdir / f"{prefix}_zoom_plot.png",
@@ -1398,6 +1430,8 @@ def main() -> int:
 
     serial, pd, plt = import_dependencies()
     live_viewer = None
+    live_bp_viewer = None
+    live_bp_context = None
     if args.live_upper_arm_validation:
         try:
             import view_live_upper_arm_hr as live_viewer
@@ -1407,6 +1441,28 @@ def main() -> int:
                 f"Python environment.\nDetails: {exc}",
                 file=sys.stderr,
             )
+            return 2
+    elif args.live_bp_model_dir:
+        try:
+            import view_live_bp as live_bp_viewer
+
+            from bp_core.inference import load_model_bundle
+
+            bundle = load_model_bundle(
+                args.live_bp_model_dir,
+                expected_participant_id=args.subject,
+                allow_unvalidated=bool(args.allow_unvalidated),
+            )
+            live_bp_context = live_bp_viewer.ViewerContext(
+                participant_id=bundle.participant_id,
+                calibration_sbp=bundle.calibration_sbp,
+                calibration_dbp=bundle.calibration_dbp,
+                config=bundle.config,
+                bundle=bundle,
+                allow_unvalidated=bool(args.allow_unvalidated),
+            )
+        except (ImportError, ValueError, OSError) as exc:
+            print(f"ERROR: Live BP validation could not load the model.\nDetails: {exc}", file=sys.stderr)
             return 2
 
     outdir = Path(args.outdir)
@@ -1422,6 +1478,7 @@ def main() -> int:
     csv_path = output_paths["csv"]
     imu_csv_path = output_paths["imu_csv"]
     live_hr_csv_path = output_paths["live_hr_csv"]
+    live_bp_csv_path = output_paths["live_bp_csv"]
     metadata_path = output_paths["metadata"]
     plot_path = output_paths["plot"]
     zoom_plot_path = output_paths["zoom_plot"]
@@ -1433,14 +1490,16 @@ def main() -> int:
     interrupted = False
     firmware_diagnostics = create_firmware_diagnostics()
     live_hr_records: list[dict] = []
+    live_bp_records: list[dict] = []
     live_state = None
 
     print(f"Opening {args.port} at {args.baud} baud...")
     try:
         with serial.Serial(args.port, args.baud, timeout=1) as ser:
-            if live_viewer is not None:
+            active_viewer = live_viewer or live_bp_viewer
+            if active_viewer is not None:
                 try:
-                    ser.set_buffer_size(rx_size=live_viewer.SERIAL_RECEIVE_BUFFER_BYTES)
+                    ser.set_buffer_size(rx_size=active_viewer.SERIAL_RECEIVE_BUFFER_BYTES)
                 except (AttributeError, NotImplementedError, OSError):
                     pass
             # Many ESP32 boards reset when the serial port opens. Give boot text time to pass.
@@ -1453,6 +1512,8 @@ def main() -> int:
             next_live_update = recording_start_monotonic
             if live_viewer is not None:
                 live_state = live_viewer.UpperArmViewerState(started_at=recording_start_monotonic)
+            elif live_bp_viewer is not None:
+                live_state = live_bp_viewer.BPViewerState(started_at=recording_start_monotonic)
             print(f"Recording for {args.duration:.2f} s. Press Ctrl+C to stop early and save.")
 
             while time.monotonic() < deadline:
@@ -1472,11 +1533,26 @@ def main() -> int:
                             live_viewer.render_screen(live_state, now, args.port, args.baud, saving=True)
                         )
                         next_live_update = now + live_viewer.DEFAULT_REFRESH_SECONDS
+                    elif live_bp_viewer is not None and live_state is not None and live_bp_context is not None and now >= next_live_update:
+                        live_bp_viewer.maybe_predict(live_state, live_bp_context, now)
+                        live_bp_records.append(
+                            live_bp_viewer.build_validation_record(
+                                live_state, live_bp_context, now, now - recording_start_monotonic
+                            )
+                        )
+                        live_bp_viewer.clear_and_render(
+                            live_bp_viewer.render_screen(
+                                live_state, live_bp_context, now, args.port, args.baud, saving=True
+                            )
+                        )
+                        next_live_update = now + live_bp_viewer.DEFAULT_REFRESH_SECONDS
                     continue
 
                 line = raw_line.decode("utf-8", errors="replace")
                 if live_viewer is not None and live_state is not None:
                     live_viewer.update_state_from_line(live_state, line, now)
+                elif live_bp_viewer is not None and live_state is not None:
+                    live_bp_viewer.update_state_from_line(live_state, line, now)
                 update_firmware_diagnostics(firmware_diagnostics, parse_firmware_status_line(line))
                 imu_row = parse_imu_row(line)
                 if imu_row is not None:
@@ -1501,6 +1577,19 @@ def main() -> int:
                         live_viewer.render_screen(live_state, now, args.port, args.baud, saving=True)
                     )
                     next_live_update = now + live_viewer.DEFAULT_REFRESH_SECONDS
+                elif live_bp_viewer is not None and live_state is not None and live_bp_context is not None and now >= next_live_update:
+                    live_bp_viewer.maybe_predict(live_state, live_bp_context, now)
+                    live_bp_records.append(
+                        live_bp_viewer.build_validation_record(
+                            live_state, live_bp_context, now, now - recording_start_monotonic
+                        )
+                    )
+                    live_bp_viewer.clear_and_render(
+                        live_bp_viewer.render_screen(
+                            live_state, live_bp_context, now, args.port, args.baud, saving=True
+                        )
+                    )
+                    next_live_update = now + live_bp_viewer.DEFAULT_REFRESH_SECONDS
 
     except KeyboardInterrupt:
         interrupted = True
@@ -1522,6 +1611,9 @@ def main() -> int:
     if live_viewer is not None:
         live_hr_df = pd.DataFrame(live_hr_records, columns=live_viewer.VALIDATION_COLUMNS)
         live_hr_df.to_csv(live_hr_csv_path, index=False)
+    if live_bp_viewer is not None:
+        live_bp_df = pd.DataFrame(live_bp_records, columns=live_bp_viewer.VALIDATION_COLUMNS)
+        live_bp_df.to_csv(live_bp_csv_path, index=False)
 
     summary = summarize(df, args.duration)
     imu_summary = summarize_imu(imu_df, args.duration)
@@ -1549,6 +1641,50 @@ def main() -> int:
         live_hr_csv_path if live_viewer is not None else None,
         live_hr_records,
     )
+    if live_bp_viewer is not None and live_bp_context is not None:
+        metadata.update(
+            {
+                "output_live_bp_csv_filename": live_bp_csv_path.name,
+                "output_live_bp_csv_path": str(live_bp_csv_path),
+                "pc_live_bp_validation_enabled": True,
+                "pc_live_bp_update_count": len(live_bp_records),
+                "pc_live_bp_numeric_update_count": sum(
+                    record.get("sbp") is not None and record.get("dbp") is not None
+                    for record in live_bp_records
+                ),
+                "pc_live_bp_model_dir": str(Path(args.live_bp_model_dir).resolve()),
+                "pc_live_bp_model_eligible": bool(
+                    live_bp_context.bundle and live_bp_context.bundle.viewer_eligible
+                ),
+                "pc_live_bp_allow_unvalidated": bool(args.allow_unvalidated),
+                "pc_live_bp_model_participant_id": (
+                    live_bp_context.bundle.participant_id if live_bp_context.bundle else None
+                ),
+                "pc_live_bp_calibration_id": (
+                    live_bp_context.bundle.calibration_id if live_bp_context.bundle else None
+                ),
+                "pc_live_bp_model_manifest_schema_version": (
+                    live_bp_context.bundle.manifest.get("schema_version")
+                    if live_bp_context.bundle
+                    else None
+                ),
+                "pc_live_bp_config_sha256": (
+                    live_bp_context.bundle.manifest.get("config_sha256")
+                    if live_bp_context.bundle
+                    else None
+                ),
+                "pc_live_bp_selected_models": (
+                    {
+                        target: live_bp_context.bundle.manifest.get("models", {})
+                        .get(target, {})
+                        .get("model")
+                        for target in ("sbp", "dbp")
+                    }
+                    if live_bp_context.bundle
+                    else None
+                ),
+            }
+        )
     metadata_path.write_text(json.dumps(metadata, indent=2) + "\n", encoding="utf-8")
 
     save_plot(df, plot_path, plt)
@@ -1585,6 +1721,13 @@ def main() -> int:
         stable_update_count = sum(record.get("status") == "stable" for record in live_hr_records)
         print(f"  live upper-arm HR CSV: {live_hr_csv_path}")
         print(f"  live upper-arm updates: {len(live_hr_records)} ({stable_update_count} stable)")
+    if live_bp_viewer is not None:
+        numeric_count = sum(
+            record.get("sbp") is not None and record.get("dbp") is not None
+            for record in live_bp_records
+        )
+        print(f"  live BP CSV: {live_bp_csv_path}")
+        print(f"  live BP updates: {len(live_bp_records)} ({numeric_count} numeric)")
 
     return 0
 
