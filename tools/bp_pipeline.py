@@ -207,7 +207,13 @@ def command_run(args: argparse.Namespace) -> int:
     run_id = args.run_id or datetime.now().strftime("%Y%m%dT%H%M%S")
     output_root = resolve_path(config["output_root"])
     run_dir = _prepare_run_dir(output_root, run_id, args.overwrite, args.resume)
-    shutil.copy2(config_path, run_dir / "config_snapshot.json")
+    config_snapshot = run_dir / "config_snapshot.json"
+    if args.resume:
+        if not config_snapshot.exists():
+            raise ValueError("--resume requires the run's existing config_snapshot.json")
+        if _sha256(config_snapshot) != _sha256(config_path):
+            raise ValueError("--resume configuration does not match the run's frozen config_snapshot.json")
+    shutil.copy2(config_path, config_snapshot)
 
     recordings, statuses = discover_recordings(config)
     audit = _save_audit(run_dir, config, recordings, statuses)
@@ -223,6 +229,9 @@ def command_run(args: argparse.Namespace) -> int:
         print("Reusing saved segment and occasion features...", flush=True)
         segments = pd.read_csv(segment_path)
         occasions = pd.read_csv(occasion_path)
+        required_quality_columns = {"occasion_rejection_reasons", "unique_clean_coverage_s"}
+        if not required_quality_columns.issubset(occasions.columns):
+            raise ValueError("Saved features predate the strengthened occasion-quality gate; start a new run")
         extraction_errors = pd.read_csv(error_path).to_dict("records") if error_path.exists() else []
     else:
         print(f"Discovered {len(recordings)} labelled recordings; extracting morphology features...", flush=True)
@@ -232,6 +241,8 @@ def command_run(args: argparse.Namespace) -> int:
         pd.DataFrame(extraction_errors, columns=["dataset_id", "participant_id", "recording_id", "error"]).to_csv(
             error_path, index=False
         )
+    rejected = occasions[occasions["occasion_usable"] != True] if not occasions.empty else occasions  # noqa: E712
+    rejected.to_csv(run_dir / "rejected_occasions.csv", index=False)
 
     examples = build_personalized_examples(occasions)
     examples.to_csv(run_dir / "personalized_examples.csv", index=False)
@@ -386,8 +397,22 @@ def command_single_subject(args: argparse.Namespace) -> int:
     occasions_path = run_dir / "occasion_features.csv"
     if not occasions_path.exists():
         raise FileNotFoundError(f"Existing run does not contain occasion_features.csv: {run_dir}")
+    config_snapshot = run_dir / "config_snapshot.json"
+    if not config_snapshot.exists() or _sha256(config_snapshot) != _sha256(config_path):
+        raise ValueError("--config does not match the run's frozen config_snapshot.json")
     participant_folder = _safe_participant_folder(str(args.participant_id))
     occasions = pd.read_csv(occasions_path)
+    required_quality_columns = {
+        "occasion_usable",
+        "occasion_rejection_reasons",
+        "unique_clean_coverage_s",
+    }
+    missing_quality_columns = sorted(required_quality_columns - set(occasions.columns))
+    if missing_quality_columns:
+        raise ValueError(
+            "Run predates the strengthened occasion-quality gate; rerun bp_pipeline.py run "
+            f"(missing: {', '.join(missing_quality_columns)})"
+        )
     calibration, development, test, split = prepare_single_subject_split(
         occasions,
         str(args.participant_id),
@@ -547,6 +572,7 @@ def command_predict(args: argparse.Namespace) -> int:
         },
         "accepted_windows": result.accepted_windows,
         "total_windows": result.total_windows,
+        "unique_clean_coverage_s": result.clean_coverage_s,
         "pulse_rate_bpm": result.pulse_rate_bpm,
         "delta_sbp": result.delta_sbp,
         "delta_dbp": result.delta_dbp,

@@ -435,7 +435,7 @@ def load_recording(recording: Recording) -> SignalData:
         acceleration = None
         if recording.imu_path and Path(recording.imu_path).exists():
             imu = pd.read_csv(recording.imu_path)
-            if all(column in imu.columns for column in LOCAL_IMU_COLUMNS):
+            if len(imu) and all(column in imu.columns for column in LOCAL_IMU_COLUMNS):
                 imu_time = pd.to_numeric(imu["timestamp_ms"], errors="coerce").to_numpy(dtype=float)
                 axes = imu[["x_raw", "y_raw", "z_raw"]].apply(pd.to_numeric, errors="coerce").to_numpy(dtype=float)
                 axes *= float(metadata.get("imu_scale_g_per_lsb", 0.0039)) * 9.80665

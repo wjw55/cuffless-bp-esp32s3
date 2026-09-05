@@ -47,6 +47,8 @@
     "minimum_template_correlation": 0.6,
     "maximum_clipped_fraction": 0.005,
     "minimum_accepted_windows_per_occasion": 3,
+    "minimum_unique_clean_coverage_seconds": 60.0,
+    "require_upper_arm_analyzer_acceptance": true,
     "local_contact_threshold_counts": 50000.0,
     "motion_margin_seconds": 1.0,
     "contact_margin_seconds": 2.0

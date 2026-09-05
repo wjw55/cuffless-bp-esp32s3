@@ -9,8 +9,15 @@ import pandas as pd
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from bp_core.datasets import audit_datasets, discover_recordings
-from bp_core.features import build_occasion_features, extract_window_features, process_recording
+from bp_core.datasets import Recording, SignalData, audit_datasets, discover_recordings
+from bp_core.features import (
+    SignalQualityError,
+    aggregate_recording_features,
+    build_occasion_features,
+    extract_window_features,
+    process_recording,
+    process_signal,
+)
 from bp_core.models import (
     build_personalized_examples,
     evaluate_personalized_models,
@@ -60,6 +67,8 @@ def minimal_config(root: Path) -> dict:
             "minimum_template_correlation": 0.6,
             "maximum_clipped_fraction": 0.005,
             "minimum_accepted_windows_per_occasion": 3,
+            "minimum_unique_clean_coverage_seconds": 16.0,
+            "require_upper_arm_analyzer_acceptance": False,
             "local_contact_threshold_counts": 50000.0,
             "motion_margin_seconds": 1.0,
             "contact_margin_seconds": 2.0,
@@ -148,6 +157,41 @@ def single_subject_occasions(count=17, calibration_index=0):
 
 
 class BPPipelineTests(unittest.TestCase):
+    @staticmethod
+    def quality_recording() -> Recording:
+        return Recording(
+            dataset_id="local_upper_arm",
+            participant_id="P001",
+            session_id="quality",
+            recording_id="quality_001",
+            label_group_id="local_upper_arm:P001:quality:quality_001",
+            chronological_order="2026-01-01T09:00:00",
+            sensor_site="upper_arm",
+            sample_rate_hz=100.0,
+            ppg_path="",
+            imu_path=None,
+            sbp=120.0,
+            dbp=80.0,
+            reference_hr=70.0,
+            label_source="omron",
+            label_timing="after_ppg",
+            quality_status="good",
+        )
+
+    @staticmethod
+    def quality_signal(duration_s=70.0, metadata=None) -> SignalData:
+        time_s, ir, red = synthetic_ppg(duration_s)
+        return SignalData(
+            time_s=time_s,
+            ir=ir,
+            red=red,
+            acceleration_m_s2=np.column_stack(
+                [np.zeros(len(time_s)), np.zeros(len(time_s)), np.full(len(time_s), 9.80665)]
+            ),
+            sample_sequence=np.arange(len(time_s), dtype=float),
+            metadata=dict(metadata or {}),
+        )
+
     def test_extracts_normalized_morphology_from_synthetic_ppg(self):
         with TemporaryDirectory() as tmp:
             config = minimal_config(Path(tmp))
@@ -226,6 +270,137 @@ class BPPipelineTests(unittest.TestCase):
 
             self.assertTrue(any("motion" in row["rejection_reason"] for row in rows))
             self.assertTrue(any(row["accepted"] for row in rows))
+
+    def test_recording_rejects_missing_and_non_monotonic_sequences_and_timestamps(self):
+        config = minimal_config(Path("."))
+        cases = []
+        missing_sequence = self.quality_signal()
+        missing_sequence.sample_sequence[100:] += 1
+        cases.append((missing_sequence, "missing_ppg_sequences"))
+        backwards_sequence = self.quality_signal()
+        backwards_sequence.sample_sequence[100] = backwards_sequence.sample_sequence[99]
+        cases.append((backwards_sequence, "non_monotonic_ppg_sequences"))
+        missing_timestamp = self.quality_signal()
+        missing_timestamp.time_s[100:] += 0.02
+        cases.append((missing_timestamp, "missing_ppg_timestamps"))
+        backwards_timestamp = self.quality_signal()
+        backwards_timestamp.time_s[100] = backwards_timestamp.time_s[99]
+        cases.append((backwards_timestamp, "non_monotonic_ppg_timestamps"))
+
+        for signal, reason in cases:
+            with self.subTest(reason=reason), self.assertRaisesRegex(SignalQualityError, reason):
+                process_signal(self.quality_recording(), signal, config)
+
+    def test_recording_rejects_every_ppg_and_imu_health_counter(self):
+        config = minimal_config(Path("."))
+        counters = (
+            "firmware_i2c_error_count",
+            "firmware_fifo_overflow_count",
+            "imu_firmware_i2c_error_count",
+            "imu_firmware_fifo_overflow_count",
+        )
+        for counter in counters:
+            with self.subTest(counter=counter), self.assertRaisesRegex(SignalQualityError, counter):
+                process_signal(
+                    self.quality_recording(),
+                    self.quality_signal(metadata={counter: 1}),
+                    config,
+                )
+
+    def test_local_upper_arm_waveform_must_pass_stricter_analyzer(self):
+        config = minimal_config(Path("."))
+        config["quality"]["require_upper_arm_analyzer_acceptance"] = True
+        first = self.quality_signal(duration_s=45.0)
+        second = self.quality_signal(duration_s=45.0)
+        second_time, second_ir, second_red = synthetic_ppg(duration_s=45.0, bpm=102.0)
+        second.time_s = second_time + first.time_s[-1] + 0.01
+        second.ir = second_ir
+        second.red = second_red
+        second.sample_sequence += len(first.time_s)
+        signal = SignalData(
+            time_s=np.concatenate([first.time_s, second.time_s]),
+            ir=np.concatenate([first.ir, second.ir]),
+            red=np.concatenate([first.red, second.red]),
+            acceleration_m_s2=np.vstack([first.acceleration_m_s2, second.acceleration_m_s2]),
+            sample_sequence=np.concatenate([first.sample_sequence, second.sample_sequence]),
+            metadata={},
+        )
+
+        with self.assertRaisesRegex(SignalQualityError, "poor_waveform_quality"):
+            process_signal(self.quality_recording(), signal, config)
+
+    def test_occasion_coverage_uses_interval_union_and_minimum_window_gate(self):
+        config = minimal_config(Path("."))
+        config["quality"]["minimum_unique_clean_coverage_seconds"] = 17.0
+        segments = pd.DataFrame(
+            [
+                {"recording_id": "r1", "start_s": 0.0, "end_s": 8.0, "accepted": True, "rejection_reason": ""},
+                {"recording_id": "r1", "start_s": 4.0, "end_s": 12.0, "accepted": True, "rejection_reason": ""},
+                {"recording_id": "r1", "start_s": 8.0, "end_s": 16.0, "accepted": True, "rejection_reason": ""},
+            ]
+        )
+        rejected = aggregate_recording_features(self.quality_recording(), segments, config)
+        self.assertEqual(rejected["unique_clean_coverage_s"], 16.0)
+        self.assertFalse(rejected["occasion_usable"])
+        self.assertIn("insufficient_unique_clean_coverage", rejected["occasion_rejection_reasons"])
+
+        config["quality"]["minimum_unique_clean_coverage_seconds"] = 16.0
+        accepted = aggregate_recording_features(self.quality_recording(), segments, config)
+        self.assertTrue(accepted["occasion_usable"])
+        config["quality"]["minimum_accepted_windows_per_occasion"] = 4
+        too_few = aggregate_recording_features(self.quality_recording(), segments, config)
+        self.assertIn("insufficient_accepted_windows", too_few["occasion_rejection_reasons"])
+
+    def test_unresolved_motion_and_contact_reasons_are_explicit(self):
+        config = minimal_config(Path("."))
+        config["quality"]["minimum_unique_clean_coverage_seconds"] = 60.0
+        segments = pd.DataFrame(
+            [
+                {"recording_id": "r1", "start_s": 0.0, "end_s": 8.0, "accepted": True, "rejection_reason": ""},
+                {"recording_id": "r1", "start_s": 4.0, "end_s": 12.0, "accepted": False, "rejection_reason": "motion"},
+                {"recording_id": "r1", "start_s": 8.0, "end_s": 16.0, "accepted": False, "rejection_reason": "contact_step"},
+            ]
+        )
+        occasion = aggregate_recording_features(self.quality_recording(), segments, config)
+        self.assertFalse(occasion["occasion_usable"])
+        self.assertIn("unresolved_motion_artifact", occasion["occasion_rejection_reasons"])
+        self.assertIn("unresolved_contact_artifact", occasion["occasion_rejection_reasons"])
+
+    def test_failed_recording_remains_as_explicitly_rejected_occasion(self):
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config = minimal_config(root)
+            config["quality"]["minimum_unique_clean_coverage_seconds"] = 16.0
+            (root / "one_month").mkdir()
+            write_local_trial(root, "P001", "001", 120, 78)
+            metadata_path = root / "raw" / "P001_session_001_metadata.json"
+            metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+            metadata["firmware_i2c_error_count"] = 1
+            metadata_path.write_text(json.dumps(metadata), encoding="utf-8")
+            recordings, _ = discover_recordings(config)
+
+            _, occasions, errors = build_occasion_features(recordings, config)
+
+            self.assertEqual(len(occasions), 1)
+            self.assertFalse(bool(occasions.iloc[0]["occasion_usable"]))
+            self.assertIn("firmware_i2c_error_count", occasions.iloc[0]["occasion_rejection_reasons"])
+            self.assertEqual(errors, [])
+
+    def test_quality_decisions_do_not_depend_on_bp_labels(self):
+        config = minimal_config(Path("."))
+        signal = self.quality_signal()
+        first = self.quality_recording()
+        second = self.quality_recording()
+        second.sbp = 180.0
+        second.dbp = 105.0
+
+        first_rows = process_signal(first, signal, config)
+        second_rows = process_signal(second, signal, config)
+
+        self.assertEqual(
+            [(row["accepted"], row["rejection_reason"]) for row in first_rows],
+            [(row["accepted"], row["rejection_reason"]) for row in second_rows],
+        )
 
     def test_aggregates_windows_before_creating_personalized_examples(self):
         with TemporaryDirectory() as tmp:

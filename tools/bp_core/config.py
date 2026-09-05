@@ -18,6 +18,15 @@ def load_config(path: str | Path) -> tuple[dict[str, Any], Path]:
     for section in ("datasets", "signal", "quality", "models"):
         if not isinstance(config.get(section), dict):
             raise ValueError(f"BP pipeline config is missing object: {section}")
+    minimum_windows = config["quality"].get("minimum_accepted_windows_per_occasion")
+    minimum_coverage = config["quality"].get("minimum_unique_clean_coverage_seconds")
+    if not isinstance(minimum_windows, int) or isinstance(minimum_windows, bool) or minimum_windows < 1:
+        raise ValueError("quality.minimum_accepted_windows_per_occasion must be a positive integer")
+    if not isinstance(minimum_coverage, (int, float)) or isinstance(minimum_coverage, bool) or minimum_coverage <= 0:
+        raise ValueError("quality.minimum_unique_clean_coverage_seconds must be positive")
+    upper_arm_gate = config["quality"].get("require_upper_arm_analyzer_acceptance")
+    if not isinstance(upper_arm_gate, bool):
+        raise ValueError("quality.require_upper_arm_analyzer_acceptance must be true or false")
     return config, config_path
 
 

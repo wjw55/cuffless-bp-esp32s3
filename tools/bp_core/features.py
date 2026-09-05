@@ -31,6 +31,114 @@ MODEL_FEATURES = [
     "template_correlation",
 ]
 
+SENSOR_HEALTH_COUNTERS = (
+    "firmware_i2c_error_count",
+    "firmware_fifo_overflow_count",
+    "imu_firmware_i2c_error_count",
+    "imu_firmware_fifo_overflow_count",
+)
+
+
+class SignalQualityError(ValueError):
+    """A recording-level fault that makes every window unusable."""
+
+
+def _counter_rejection_reasons(metadata: dict[str, Any]) -> list[str]:
+    reasons: list[str] = []
+    for key in SENSOR_HEALTH_COUNTERS:
+        if key not in metadata or metadata[key] in (None, ""):
+            continue
+        try:
+            value = float(metadata[key])
+        except (TypeError, ValueError):
+            reasons.append(f"invalid_sensor_health_counter:{key}")
+            continue
+        if not math.isfinite(value) or value < 0:
+            reasons.append(f"invalid_sensor_health_counter:{key}")
+        elif value > 0:
+            reasons.append(f"sensor_health_error:{key}={value:g}")
+    return reasons
+
+
+def recording_quality_reasons(recording: Recording, signal: SignalData) -> list[str]:
+    """Return label-independent recording faults shared by every BP path."""
+    reasons = _counter_rejection_reasons(signal.metadata)
+    time_s = np.asarray(signal.time_s, dtype=float)
+    if len(time_s) < 2 or not np.all(np.isfinite(time_s)):
+        reasons.append("missing_ppg_timestamps")
+    else:
+        timestamp_differences = np.diff(time_s)
+        if np.any(timestamp_differences <= 0):
+            reasons.append("non_monotonic_ppg_timestamps")
+        else:
+            typical_interval = float(np.median(timestamp_differences))
+            if typical_interval > 0 and np.any(timestamp_differences > 1.5 * typical_interval):
+                reasons.append("missing_ppg_timestamps")
+
+    sequence = signal.sample_sequence
+    if sequence is None or len(sequence) != len(time_s):
+        reasons.append("missing_ppg_sequences")
+    else:
+        sequence = np.asarray(sequence, dtype=float)
+        if not np.all(np.isfinite(sequence)):
+            reasons.append("missing_ppg_sequences")
+        elif len(sequence) > 1:
+            differences = np.diff(sequence)
+            if np.any(differences <= 0):
+                reasons.append("non_monotonic_ppg_sequences")
+            if np.any((differences > 0) & ~np.isclose(differences, 1.0, rtol=0.0, atol=1e-9)):
+                reasons.append("missing_ppg_sequences")
+
+    rejected_statuses = {"reject", "rejected", "unusable", "poor", "pending_manual_review", "uncertain"}
+    status = str(recording.quality_status or "").strip().lower()
+    if recording.dataset_id == "local_upper_arm" and status in rejected_statuses:
+        reasons.append(f"unresolved_quality_status:{status}")
+    return sorted(set(reasons))
+
+
+def _upper_arm_analyzer_reasons(
+    recording: Recording,
+    signal: SignalData,
+    quality: dict[str, Any],
+) -> list[str]:
+    if (
+        recording.dataset_id != "local_upper_arm"
+        or not bool(quality.get("require_upper_arm_analyzer_acceptance", False))
+    ):
+        return []
+    # Import lazily so external-dataset-only uses of bp_core do not depend on
+    # the upper-arm presentation module being imported at startup.
+    from upper_arm_hr import analyze_upper_arm_ppg
+
+    first_timestamp_ms = float(signal.metadata.get("bp_pipeline_first_timestamp_ms", 0.0))
+    sequence = np.asarray(signal.sample_sequence, dtype=float)
+    frame = pd.DataFrame(
+        {
+            "sample_seq": sequence,
+            "timestamp_ms": first_timestamp_ms + np.asarray(signal.time_s, dtype=float) * 1000.0,
+            "red": np.asarray(signal.red if signal.red is not None else signal.ir, dtype=float),
+            "ir": np.asarray(signal.ir, dtype=float),
+        }
+    )
+    try:
+        result = analyze_upper_arm_ppg(frame, signal.metadata)
+    except Exception as exc:
+        return [f"upper_arm_quality_error:{exc}"]
+    if result.status == "usable":
+        return []
+    status_map = {
+        "motion_contaminated": "unresolved_motion_artifact",
+        "contact_artifact": "unresolved_contact_artifact",
+        "poor_contact": "unresolved_contact_artifact",
+        "clipping": "unresolved_contact_artifact",
+        "invalid_timing": "invalid_upper_arm_timing",
+        "ambiguous_hr": "poor_waveform_quality",
+        "poor_waveform_quality": "poor_waveform_quality",
+        "insufficient_clean_data": "poor_waveform_quality",
+    }
+    category = status_map.get(result.status, "poor_waveform_quality")
+    return [f"{category}:upper_arm_analyzer={result.status}"]
+
 
 def scaled_mad(values: np.ndarray) -> float:
     finite = np.asarray(values, dtype=float)
@@ -67,7 +175,7 @@ def _motion_mask(signal: SignalData, sample_rate_hz: float, margin_s: float) -> 
             valid.append((elapsed_s, str(update.get("status", ""))))
         valid.sort()
         for index, (start_s, status) in enumerate(valid):
-            if status != "moving":
+            if status == "still":
                 continue
             end_s = valid[index + 1][0] if index + 1 < len(valid) else float(signal.time_s[-1])
             mask |= (signal.time_s >= start_s) & (signal.time_s <= end_s)
@@ -333,17 +441,14 @@ def process_signal(
     """Extract segment features from an in-memory signal using the training path."""
     settings = config["signal"]
     quality = config["quality"]
+    recording_reasons = recording_quality_reasons(recording, signal)
+    if not recording_reasons:
+        recording_reasons.extend(_upper_arm_analyzer_reasons(recording, signal, quality))
+    if recording_reasons:
+        raise SignalQualityError(";".join(recording_reasons))
     sample_rate = estimate_sample_rate(signal.time_s) or recording.sample_rate_hz
     if sample_rate is None or sample_rate <= 0:
         raise ValueError("sample_rate_unavailable")
-    finite_time = signal.time_s[np.isfinite(signal.time_s)]
-    if len(finite_time) < 2 or np.any(np.diff(finite_time) <= 0):
-        raise ValueError("non_monotonic_timestamps")
-    if signal.sample_sequence is not None and len(signal.sample_sequence) > 1:
-        differences = np.diff(signal.sample_sequence)
-        if np.any(differences <= 0) or np.any(differences > 1):
-            raise ValueError("missing_or_non_monotonic_sample_sequence")
-
     motion = _motion_mask(signal, sample_rate, float(quality["motion_margin_seconds"]))
     contact, poor_contact, clipping = _contact_masks(signal, recording, sample_rate, quality)
     rows: list[dict[str, Any]] = []
@@ -364,6 +469,7 @@ def process_signal(
             "sbp": recording.sbp,
             "dbp": recording.dbp,
             "reference_hr": recording.reference_hr,
+            "quality_status": recording.quality_status,
             "calibration_occasion": recording.calibration_occasion,
             "accepted": False,
             "rejection_reason": "",
@@ -424,10 +530,51 @@ def aggregate_recording_features(
     recording: Recording,
     segment_rows: list[dict[str, Any]] | pd.DataFrame,
     config: dict[str, Any],
+    recording_rejection_reasons: list[str] | None = None,
 ) -> dict[str, Any]:
     """Aggregate one recording exactly as the training pipeline aggregates an occasion."""
     group = segment_rows.copy() if isinstance(segment_rows, pd.DataFrame) else pd.DataFrame(segment_rows)
-    minimum = int(config["quality"]["minimum_accepted_windows_per_occasion"])
+    quality = config["quality"]
+    minimum = int(quality.get("minimum_accepted_windows_per_occasion", 3))
+    minimum_coverage = float(quality.get("minimum_unique_clean_coverage_seconds", 60.0))
+    recording_rejection_reasons = sorted(set(recording_rejection_reasons or []))
+
+    def clean_coverage_seconds(accepted_rows: pd.DataFrame) -> float:
+        if accepted_rows.empty:
+            return 0.0
+        duration = 0.0
+        grouping = "recording_id" if "recording_id" in accepted_rows.columns else None
+        groups = accepted_rows.groupby(grouping, sort=False) if grouping else [("recording", accepted_rows)]
+        for _, rows in groups:
+            intervals = sorted(
+                (float(start), float(end))
+                for start, end in zip(rows["start_s"], rows["end_s"])
+                if math.isfinite(float(start)) and math.isfinite(float(end)) and float(end) > float(start)
+            )
+            merged: list[list[float]] = []
+            for start, end in intervals:
+                if not merged or start > merged[-1][1]:
+                    merged.append([start, end])
+                else:
+                    merged[-1][1] = max(merged[-1][1], end)
+            duration += sum(end - start for start, end in merged)
+        return float(duration)
+
+    def rejection_reasons(accepted_rows: pd.DataFrame, all_rows: pd.DataFrame) -> list[str]:
+        reasons = list(recording_rejection_reasons)
+        coverage = clean_coverage_seconds(accepted_rows)
+        if len(accepted_rows) < minimum:
+            reasons.append(f"insufficient_accepted_windows:{len(accepted_rows)}<{minimum}")
+        if coverage + 1e-9 < minimum_coverage:
+            reasons.append(f"insufficient_unique_clean_coverage:{coverage:.3f}<{minimum_coverage:.3f}")
+        rejected_text = ";".join(all_rows.get("rejection_reason", pd.Series(dtype=str)).fillna("").astype(str))
+        if coverage + 1e-9 < minimum_coverage and "motion" in rejected_text:
+            reasons.append("unresolved_motion_artifact")
+        if coverage + 1e-9 < minimum_coverage and any(
+            value in rejected_text for value in ("contact_step", "poor_contact", "clipping")
+        ):
+            reasons.append("unresolved_contact_artifact")
+        return sorted(set(reasons))
     if group.empty:
         return {
             "dataset_id": recording.dataset_id,
@@ -444,10 +591,20 @@ def aggregate_recording_features(
             "accepted_segment_count": 0,
             "accepted_segment_fraction": 0.0,
             "occasion_usable": False,
-            "occasion_status": "insufficient_clean_data",
+            "unique_clean_coverage_s": 0.0,
+            "occasion_status": "rejected",
+            "occasion_rejection_reasons": ";".join(
+                recording_rejection_reasons
+                or [
+                    f"insufficient_accepted_windows:0<{minimum}",
+                    f"insufficient_unique_clean_coverage:0.000<{minimum_coverage:.3f}",
+                ]
+            ),
         }
     accepted = group[group["accepted"] == True]  # noqa: E712
     total = len(group)
+    clean_coverage = clean_coverage_seconds(accepted)
+    occasion_reasons = rejection_reasons(accepted, group)
     row: dict[str, Any] = {
         "dataset_id": recording.dataset_id,
         "participant_id": recording.participant_id,
@@ -458,12 +615,15 @@ def aggregate_recording_features(
         "sbp": recording.sbp,
         "dbp": recording.dbp,
         "reference_hr": recording.reference_hr,
+        "quality_status": recording.quality_status,
         "calibration_occasion": recording.calibration_occasion,
         "total_segment_count": total,
         "accepted_segment_count": len(accepted),
         "accepted_segment_fraction": len(accepted) / total if total else 0.0,
-        "occasion_usable": len(accepted) >= minimum,
-        "occasion_status": "usable" if len(accepted) >= minimum else "insufficient_clean_data",
+        "unique_clean_coverage_s": clean_coverage,
+        "occasion_usable": not occasion_reasons,
+        "occasion_status": "usable" if not occasion_reasons else "rejected",
+        "occasion_rejection_reasons": ";".join(occasion_reasons),
     }
     for column in [name for name in group.columns if name.startswith("feature__")]:
         values = pd.to_numeric(accepted[column], errors="coerce")
@@ -480,11 +640,15 @@ def build_occasion_features(
     segment_rows: list[dict[str, Any]] = []
     errors: list[dict[str, str]] = []
     recording_by_group: dict[str, list[Recording]] = {}
+    failures_by_group: dict[str, list[str]] = {}
     for recording in recordings:
         recording_by_group.setdefault(recording.label_group_id, []).append(recording)
         try:
             segment_rows.extend(process_recording(recording, config))
+        except SignalQualityError as exc:
+            failures_by_group.setdefault(recording.label_group_id, []).extend(str(exc).split(";"))
         except Exception as exc:
+            failures_by_group.setdefault(recording.label_group_id, []).extend(str(exc).split(";"))
             errors.append(
                 {
                     "dataset_id": recording.dataset_id,
@@ -495,9 +659,9 @@ def build_occasion_features(
             )
     segments = pd.DataFrame(segment_rows)
     occasions: list[dict[str, Any]] = []
-    if segments.empty:
-        return segments, pd.DataFrame(), errors
-    for label_group_id, group in segments.groupby("label_group_id", sort=True):
+    segment_groups = {key: value for key, value in segments.groupby("label_group_id", sort=True)} if not segments.empty else {}
+    for label_group_id in sorted(recording_by_group):
+        group = segment_groups.get(label_group_id, pd.DataFrame())
         source_rows = recording_by_group[label_group_id]
         sbp_values = {row.sbp for row in source_rows}
         dbp_values = {row.dbp for row in source_rows}
@@ -508,6 +672,11 @@ def build_occasion_features(
             chronological_order=min(item.chronological_order for item in source_rows),
             calibration_occasion=any(item.calibration_occasion for item in source_rows),
         )
-        row = aggregate_recording_features(representative, group, config)
+        row = aggregate_recording_features(
+            representative,
+            group,
+            config,
+            recording_rejection_reasons=failures_by_group.get(label_group_id),
+        )
         occasions.append(row)
     return segments, pd.DataFrame(occasions), errors

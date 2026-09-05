@@ -47,6 +47,7 @@ class BPInferenceResult:
     delta_dbp: float | None = None
     accepted_windows: int = 0
     total_windows: int = 0
+    clean_coverage_s: float = 0.0
     pulse_rate_bpm: float | None = None
     model_eligible: bool = False
 
@@ -223,19 +224,6 @@ def extract_current_features(
     metadata: dict[str, Any],
     config: dict[str, Any],
 ) -> tuple[dict[str, Any], pd.DataFrame]:
-    for key in (
-        "firmware_i2c_error_count",
-        "firmware_fifo_overflow_count",
-        "imu_firmware_i2c_error_count",
-        "imu_firmware_fifo_overflow_count",
-    ):
-        try:
-            if int(metadata.get(key, 0) or 0) > 0:
-                raise ValueError(f"sensor_health_error:{key}={metadata[key]}")
-        except (TypeError, ValueError) as exc:
-            if str(exc).startswith("sensor_health_error"):
-                raise
-            raise ValueError(f"invalid_sensor_health_counter:{key}") from exc
     recording = _recording_context(participant_id)
     segments = pd.DataFrame(process_signal(recording, signal_from_ppg_frame(frame, metadata), config))
     occasion = aggregate_recording_features(recording, segments, config)
@@ -271,9 +259,16 @@ def _model_input(bundle: BPModelBundle, occasion: dict[str, Any], columns: list[
     return pd.DataFrame([values], columns=columns)
 
 
-def _quality_status(segments: pd.DataFrame) -> tuple[str, str]:
+def _quality_status(occasion: dict[str, Any], segments: pd.DataFrame) -> tuple[str, str]:
+    occasion_reasons = str(occasion.get("occasion_rejection_reasons", ""))
+    if "unresolved_motion" in occasion_reasons:
+        return "motion_contaminated", occasion_reasons
+    if "unresolved_contact" in occasion_reasons:
+        return "contact_artifact", occasion_reasons
+    if any(token in occasion_reasons for token in ("timestamp", "sequence", "sensor_health", "fifo", "i2c")):
+        return "invalid_timing", occasion_reasons
     if segments.empty:
-        return "insufficient_clean_data", "no analysis windows were available"
+        return "insufficient_clean_data", occasion_reasons or "no analysis windows were available"
     rejected = segments[segments["accepted"] != True]  # noqa: E712
     reasons = ";".join(rejected.get("rejection_reason", pd.Series(dtype=str)).fillna("").astype(str))
     if "motion" in reasons:
@@ -282,7 +277,7 @@ def _quality_status(segments: pd.DataFrame) -> tuple[str, str]:
         return "contact_artifact", "contact quality affected the analysis windows"
     if "missing" in reasons or "incomplete" in reasons:
         return "invalid_timing", "sample timing or completeness failed"
-    return "poor_waveform_quality", "too few waveform windows passed quality checks"
+    return "poor_waveform_quality", occasion_reasons or "too few waveform windows passed quality checks"
 
 
 def predict_frame(
@@ -296,19 +291,23 @@ def predict_frame(
         )
     except (ValueError, FloatingPointError) as exc:
         text = str(exc)
-        status = "invalid_timing" if "sequence" in text or "timestamp" in text or "sensor_health" in text else "analysis_error"
+        status = "invalid_timing" if any(
+            token in text for token in ("sequence", "timestamp", "sensor_health", "fifo", "i2c")
+        ) else "analysis_error"
         return BPInferenceResult(status=status, reason=text, model_eligible=bundle.viewer_eligible)
     accepted = int(occasion["accepted_segment_count"])
     total = int(occasion["total_segment_count"])
+    clean_coverage = float(occasion.get("unique_clean_coverage_s", 0.0))
     pulse = occasion.get("median__feature__pulse_rate_bpm")
     pulse_rate = float(pulse) if pulse is not None and pd.notna(pulse) else None
     if not bool(occasion["occasion_usable"]):
-        status, reason = _quality_status(segments)
+        status, reason = _quality_status(occasion, segments)
         return BPInferenceResult(
             status=status,
             reason=reason,
             accepted_windows=accepted,
             total_windows=total,
+            clean_coverage_s=clean_coverage,
             pulse_rate_bpm=pulse_rate,
             model_eligible=bundle.viewer_eligible,
         )
@@ -318,6 +317,7 @@ def predict_frame(
             reason="saved SBP and DBP models did not both beat zero-change",
             accepted_windows=accepted,
             total_windows=total,
+            clean_coverage_s=clean_coverage,
             pulse_rate_bpm=pulse_rate,
             model_eligible=False,
         )
@@ -335,6 +335,7 @@ def predict_frame(
             reason=str(exc),
             accepted_windows=accepted,
             total_windows=total,
+            clean_coverage_s=clean_coverage,
             pulse_rate_bpm=pulse_rate,
             model_eligible=bundle.viewer_eligible,
         )
@@ -344,6 +345,7 @@ def predict_frame(
             reason="model output was non-finite or SBP was not greater than DBP",
             accepted_windows=accepted,
             total_windows=total,
+            clean_coverage_s=clean_coverage,
             pulse_rate_bpm=pulse_rate,
             model_eligible=bundle.viewer_eligible,
         )
@@ -356,6 +358,7 @@ def predict_frame(
         delta_dbp=deltas["dbp"],
         accepted_windows=accepted,
         total_windows=total,
+        clean_coverage_s=clean_coverage,
         pulse_rate_bpm=pulse_rate,
         model_eligible=bundle.viewer_eligible,
     )

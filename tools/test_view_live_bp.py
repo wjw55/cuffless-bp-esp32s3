@@ -52,6 +52,8 @@ def config():
             "minimum_template_correlation": 0.6,
             "maximum_clipped_fraction": 0.005,
             "minimum_accepted_windows_per_occasion": 3,
+            "minimum_unique_clean_coverage_seconds": 60.0,
+            "require_upper_arm_analyzer_acceptance": True,
             "local_contact_threshold_counts": 50000.0,
             "motion_margin_seconds": 1.0,
             "contact_margin_seconds": 2.0,
@@ -166,6 +168,34 @@ class BPInferenceTests(unittest.TestCase):
             self.assertFalse(hidden.numeric_available)
             self.assertEqual(shown.status, "unvalidated_estimate")
             self.assertTrue(shown.numeric_available)
+
+    def test_offline_inference_uses_shared_sequence_and_health_gates(self):
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            write_model_dir(root, eligible=True)
+            bundle = load_model_bundle(root)
+            broken = ppg_frame()
+            broken.loc[100:, "sample_seq"] += 1
+
+            sequence_result = predict_frame(bundle, broken, {})
+            health_result = predict_frame(bundle, ppg_frame(), {"imu_firmware_fifo_overflow_count": 1})
+
+            self.assertEqual(sequence_result.status, "invalid_timing")
+            self.assertIn("missing_ppg_sequences", sequence_result.reason)
+            self.assertEqual(health_result.status, "invalid_timing")
+            self.assertIn("imu_firmware_fifo_overflow_count", health_result.reason)
+
+    def test_insufficient_unique_clean_coverage_hides_prediction(self):
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            write_model_dir(root, eligible=True)
+            bundle = load_model_bundle(root)
+
+            result = predict_frame(bundle, ppg_frame(duration_s=40.0), {})
+
+            self.assertFalse(result.numeric_available)
+            self.assertLess(result.clean_coverage_s, 60.0)
+            self.assertIn("insufficient_unique_clean_coverage", result.reason)
 
     def test_invalid_model_output_is_never_displayable(self):
         with TemporaryDirectory() as tmp:

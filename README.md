@@ -368,3 +368,7 @@ After `bp_pipeline.py single-subject` creates a model package, connect it withou
 ```
 
 Numeric BP is enabled by default only if both SBP and DBP models beat the zero-change baseline on the locked test. `--allow-unvalidated` permits an explicitly labelled development estimate; it must not be presented as validated BP. See [docs/bp_pipeline.md](docs/bp_pipeline.md) for offline prediction and optional collector capture commands.
+
+Before BP features enter training or prediction, one shared occasion-level gate now checks raw PPG sequence/timestamp continuity, all reported PPG/IMU I2C and FIFO counters, the conservative upper-arm analyzer, motion/contact masks, the configurable accepted-window minimum, and at least 60 seconds of unique clean coverage. Overlapping 8-second windows are unioned rather than counted repeatedly. Rejected occasions and their explicit reasons are saved in `rejected_occasions.csv`.
+
+The examined P001 run `data/processed/bp/20260904T180300` is development-only: its former locked test is no longer untouched, `viewer_eligible` remains false, and it must not be claimed as validation. Freeze the strengthened pipeline first, then evaluate it once on a newly collected chronological test set.
