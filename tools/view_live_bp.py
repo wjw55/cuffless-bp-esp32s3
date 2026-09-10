@@ -22,6 +22,13 @@ from bp_core.inference import (
     predict_frame,
 )
 from collect_ppg import parse_firmware_status_line, parse_imu_row, parse_ppg_row
+from motion_quality_shadow import (
+    MotionQualityShadowBundle,
+    MotionQualityShadowState,
+    ShadowModelCompatibilityError,
+    load_shadow_bundle,
+    maybe_score_shadow,
+)
 
 
 DEFAULT_BAUD_RATE = 115200
@@ -95,6 +102,8 @@ class ViewerContext:
     bundle: BPModelBundle | None = None
     model_error: str | None = None
     allow_unvalidated: bool = False
+    motion_quality_bundle: MotionQualityShadowBundle | None = None
+    motion_quality_error: str | None = None
 
 
 @dataclass
@@ -113,6 +122,7 @@ class BPViewerState:
     ppg_samples: deque[tuple[int, int, int, int]] = field(default_factory=deque)
     motion_updates: deque[dict] = field(default_factory=deque)
     warnings: deque[str] = field(default_factory=lambda: deque(maxlen=MAX_RECENT_WARNINGS))
+    motion_quality_shadow: MotionQualityShadowState | None = None
 
 
 def positive_float(value: str) -> float:
@@ -134,6 +144,15 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--calibration-dbp", type=positive_float)
     parser.add_argument("--allow-unvalidated", action="store_true")
     parser.add_argument("--config", default="config/bp_pipeline_v1.json")
+    parser.add_argument(
+        "--motion-quality-shadow-model",
+        help="Optional frozen motion-quality classifier package; observes only and never gates BP",
+    )
+    parser.add_argument(
+        "--motion-quality-config",
+        default="config/motion_quality_v1.json",
+        help="Configuration paired with --motion-quality-shadow-model",
+    )
     parser.add_argument("--baud", type=int, default=DEFAULT_BAUD_RATE)
     parser.add_argument("--refresh", type=positive_float, default=DEFAULT_REFRESH_SECONDS)
     args = parser.parse_args(argv)
@@ -148,12 +167,24 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 def load_viewer_context(args: argparse.Namespace) -> ViewerContext:
     config, config_path = load_config(args.config)
+    motion_quality_bundle = None
+    motion_quality_error = None
+    if args.motion_quality_shadow_model:
+        try:
+            motion_quality_bundle = load_shadow_bundle(
+                args.motion_quality_shadow_model,
+                args.motion_quality_config,
+            )
+        except ShadowModelCompatibilityError as exc:
+            motion_quality_error = str(exc)
     if not args.model_dir:
         return ViewerContext(
             participant_id=str(args.participant_id),
             calibration_sbp=float(args.calibration_sbp),
             calibration_dbp=float(args.calibration_dbp),
             config=config,
+            motion_quality_bundle=motion_quality_bundle,
+            motion_quality_error=motion_quality_error,
         )
     try:
         bundle = load_model_bundle(
@@ -173,6 +204,8 @@ def load_viewer_context(args: argparse.Namespace) -> ViewerContext:
             config=config,
             model_error=str(exc),
             allow_unvalidated=bool(args.allow_unvalidated),
+            motion_quality_bundle=motion_quality_bundle,
+            motion_quality_error=motion_quality_error,
         )
     return ViewerContext(
         participant_id=bundle.participant_id,
@@ -181,6 +214,8 @@ def load_viewer_context(args: argparse.Namespace) -> ViewerContext:
         config=bundle.config,
         bundle=bundle,
         allow_unvalidated=bool(args.allow_unvalidated),
+        motion_quality_bundle=motion_quality_bundle,
+        motion_quality_error=motion_quality_error,
     )
 
 
@@ -226,6 +261,8 @@ def update_state_from_line(state: BPViewerState, line: str, now: float) -> bool:
         state.last_line_at = now
     ppg = parse_ppg_row(line)
     if ppg is not None:
+        if state.motion_quality_shadow is not None:
+            state.motion_quality_shadow.add_ppg(ppg)
         if state.ppg_samples:
             previous = state.ppg_samples[-1]
             sequence_gap = ppg[0] != previous[0] + 1
@@ -237,7 +274,10 @@ def update_state_from_line(state: BPViewerState, line: str, now: float) -> bool:
         state.ppg_samples.append(ppg)
         _prune(state)
         return True
-    if parse_imu_row(line) is not None:
+    imu = parse_imu_row(line)
+    if imu is not None:
+        if state.motion_quality_shadow is not None:
+            state.motion_quality_shadow.add_imu(imu)
         return True
     parsed = parse_firmware_status_line(line)
     if parsed is None:
@@ -258,6 +298,8 @@ def update_state_from_line(state: BPViewerState, line: str, now: float) -> bool:
         _prune(state)
         return True
     if kind == "stats":
+        if state.motion_quality_shadow is not None:
+            state.motion_quality_shadow.add_health(kind, fields)
         previous = state.ppg_stats
         state.ppg_stats = fields
         if (
@@ -267,6 +309,8 @@ def update_state_from_line(state: BPViewerState, line: str, now: float) -> bool:
             reset_buffer(state, "invalid_timing", "PPG health counter reported an error")
         return True
     if kind == "imu_stats":
+        if state.motion_quality_shadow is not None:
+            state.motion_quality_shadow.add_health(kind, fields)
         previous = state.imu_stats
         state.imu_stats = fields
         if (
@@ -406,6 +450,35 @@ def render_screen(state: BPViewerState, context: ViewerContext, now: float, port
         f" Unique clean coverage: {result.clean_coverage_s:.1f} s",
         f"       PPG pulse rate: {result.pulse_rate_bpm:.1f} BPM" if result.pulse_rate_bpm is not None else "       PPG pulse rate: -- BPM",
         f"              Motion: {motion}",
+    ]
+    if state.motion_quality_shadow is not None:
+        shadow = state.motion_quality_shadow.result
+        probability = (
+            f"{100.0 * shadow.unusable_probability:.1f}%"
+            if shadow.unusable_probability is not None
+            else "--"
+        )
+        prediction = (shadow.prediction or shadow.status).replace("_", " ").title()
+        lines.extend(
+            [
+                "",
+                "MOTION-QUALITY ML - SHADOW ONLY",
+                f"          Prediction: {prediction}",
+                f" Unusable probability: {probability}",
+                "       Control effect: None (BP/HR behavior unchanged)",
+            ]
+        )
+    elif context.motion_quality_error:
+        lines.extend(
+            [
+                "",
+                "MOTION-QUALITY ML - SHADOW ONLY",
+                "          Prediction: Unavailable",
+                f"              Reason: {context.motion_quality_error}",
+                "       Control effect: None (BP/HR behavior unchanged)",
+            ]
+        )
+    lines.extend([
         "",
         "SENSOR HEALTH",
         _health_line("PPG", state.ppg_stats, "ovf"),
@@ -413,7 +486,7 @@ def render_screen(state: BPViewerState, context: ViewerContext, now: float, port
         f"Serial: {port} at {baud} baud | {connection_status(state, now)}",
         "",
         "RECENT WARNINGS",
-    ]
+    ])
     lines.extend(f"- {warning}" for warning in state.warnings) if state.warnings else lines.append("- none")
     if result.status == "unvalidated_estimate":
         lines.extend(["", "WARNING: UNVALIDATED DEVELOPMENT ESTIMATE"])
@@ -475,6 +548,8 @@ def import_serial():
 
 def run_viewer(args: argparse.Namespace, context: ViewerContext, serial_module, clock=time.monotonic, sleep=time.sleep) -> int:
     state = BPViewerState(started_at=clock())
+    if context.motion_quality_bundle is not None:
+        state.motion_quality_shadow = MotionQualityShadowState(context.motion_quality_bundle)
     try:
         with serial_module.Serial(args.port, args.baud, timeout=0.05) as serial_port:
             try:
@@ -490,6 +565,8 @@ def run_viewer(args: argparse.Namespace, context: ViewerContext, serial_module, 
                 if raw:
                     update_state_from_line(state, raw.decode("utf-8", errors="replace"), now)
                 if now >= next_refresh:
+                    if state.motion_quality_shadow is not None:
+                        maybe_score_shadow(state.motion_quality_shadow)
                     maybe_predict(state, context, now)
                     clear_and_render(render_screen(state, context, now, args.port, args.baud))
                     next_refresh = now + args.refresh

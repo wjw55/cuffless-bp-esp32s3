@@ -23,9 +23,13 @@ data/external/
 data/models/
 data/labels/
 
+# Local hardware design files and manufacturing packages
+hardware/
+
 # Build artifacts and directories
 **/build/
 build/
+releases/
 *.o
 *.a
 *.out

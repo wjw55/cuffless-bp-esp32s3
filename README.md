@@ -157,6 +157,76 @@ python tools\calibrate_motion.py "data\raw\test_motion_calibration_motion_*_imu.
 
 The tool and firmware use the same causal gravity removal and one-second (100-sample) rolling RMS activity calculation. Calibration excludes transition and recovery margins, then searches integer milli-g thresholds from lowest to highest. A threshold is accepted only when at least 95% of guarded stationary time is classified still and at least 90% of the guarded movement blocks are detected. Detection may occur anywhere inside a movement block; it is no longer required within 0.5 seconds of a manually timed cue. Do not configure a threshold after a failed result.
 
+For BP-independent upper-arm motion-quality development, the collector also provides a synchronized 240-second cue protocol:
+
+```powershell
+& "C:\wjw\Anaconda\python.exe" tools\collect_ppg.py `
+  --port COM5 --duration 240 `
+  --subject P001 --session motion_quality_v1 --trial-id motion_quality_001 `
+  --posture seated --sensor-location left_outer_upper_arm_5cm_above_elbow `
+  --ppg-profile upper_arm_experimental `
+  --imu-location left_upper_arm_adjacent_to_ppg `
+  --imu-orientation x_distal_y_left_z_outward `
+  --motion-protocol motion_quality_v1 `
+  --notes "firmware=participant-study-fw-v1.0; BP-unlabelled motion-quality pilot"
+```
+
+It preserves the existing raw formats and saves `*_activity_annotations.csv`. No cuff is required or accepted for this mode. See `docs/data_collection_protocol.md` for the complete schedule and review procedure.
+
+Prepare the three completed trials for manual review:
+
+```powershell
+& "C:\wjw\Anaconda\python.exe" tools\prepare_motion_quality.py prepare `
+  --config config\motion_quality_v1.json `
+  --input-dir data\raw `
+  --session motion_quality_v1 `
+  --output-dir data\processed\motion_quality_v1\stage1
+```
+
+Open the PNGs under `review_plots`, then fill only `reviewed_label`, `reviewer`, and `review_notes` in `window_review.csv`. Use exactly `clean`, `motion_corrupted`, `contact_corrupted`, or `uncertain`. The scheduled activity is context, not the answer: motion can leave the PPG clean, and a still period can contain contact corruption. Do not edit `window_features.csv`.
+
+After every reviewable row is labelled, finalize it:
+
+```powershell
+& "C:\wjw\Anaconda\python.exe" tools\prepare_motion_quality.py finalize `
+  --config config\motion_quality_v1.json `
+  --run-dir data\processed\motion_quality_v1\stage1
+```
+
+`reviewed_windows.csv` retains uncertain rows for audit but marks them ineligible for supervised training. This three-trial P001 set is development data only, not independent classifier validation.
+
+Train and evaluate the first binary motion-quality classifier after finalization:
+
+```powershell
+& "C:\wjw\Anaconda\python.exe" tools\train_motion_quality.py `
+  --config config\motion_quality_v1.json `
+  --run-dir data\processed\motion_quality_v1\stage1
+```
+
+The command compares an always-unusable safety baseline, the existing 0.05 g firmware-threshold diagnostic, L2 logistic regression, and a small random forest. Learned-model preprocessing is fitted separately inside each fold, and each fold holds out one complete trial. This prevents overlapping windows from the same recording appearing in both training and evaluation. The selected model is then fitted to all reviewed, supervised-eligible P001 windows and saved under `classifier_v1` with fold predictions, metrics, feature importance and diagnostic plots.
+
+Even when the development gates pass, the saved package is marked `independent_validation=false` and `deployment_eligible=false`. It must not control firmware, suppress BPM, filter BP data, or be described as validated until it passes fresh trials and additional participants that were not used for labelling or model selection.
+
+Evaluate the frozen development package on a separately finalized validation run without retraining:
+
+```powershell
+& "C:\wjw\Anaconda\python.exe" tools\evaluate_motion_quality.py `
+  --config config\motion_quality_v1.json `
+  --run-dir data\processed\motion_quality_v1\validation_v2 `
+  --model-package data\processed\motion_quality_v1\stage1\classifier_v1\motion_quality_classifier.joblib
+```
+
+The evaluator rejects training/validation trial overlap and incompatible configurations or feature schemas. It records model-package hashes before and after prediction and reports balanced accuracy, usable recall and unusable recall. The validation command never fits a model. Same-participant trial validation does not establish participant-independent or population performance and does not enable deployment by itself.
+
+The frozen classifier can next be observed during normal upper-arm collection without controlling any result. Add these options to an existing collector command:
+
+```powershell
+  --motion-quality-shadow-model data\processed\motion_quality_v1\stage1\classifier_v1\motion_quality_classifier.joblib `
+  --motion-quality-config config\motion_quality_v1.json
+```
+
+Shadow mode scores a completed eight-second synchronized PPG/IMU window every four seconds and saves `*_motion_quality_shadow.csv`. Its `usable`/`unusable` prediction and probability are recorded for comparison only. They do not reject raw samples, reset the BP buffer, suppress HR/BP, or change the existing raw PPG and IMU CSV formats.
+
 After a passing result, open `idf.py menuconfig`, select **PPG logger motion classification**, enter the reported `CONFIG_MOTION_THRESHOLD_MG` value, rebuild, flash, and repeat the controlled protocol. `view_live_hr.py` will then display `Still` or `Moving` while continuing to show BPM independently. Motion never suppresses BPM in this milestone, even after calibration passes.
 
 ## Collect A 90-Second PPG-Only Recording
@@ -357,6 +427,19 @@ The BP viewer is ready to run in safe pending mode before a model exists. It sho
   --calibration-sbp 116 `
   --calibration-dbp 72
 ```
+
+To display the frozen motion-quality classifier alongside pending BP, still with no control effect:
+
+```powershell
+& "C:\wjw\Anaconda\python.exe" tools\view_live_bp.py `
+  --port COM5 `
+  --participant-id P001 `
+  --calibration-sbp 116 `
+  --calibration-dbp 72 `
+  --motion-quality-shadow-model data\processed\motion_quality_v1\stage1\classifier_v1\motion_quality_classifier.joblib
+```
+
+The viewer labels this section `SHADOW ONLY`. An `Unusable` prediction is deliberately displayed beside the existing firmware motion and BP states but cannot hide or modify a BP estimate.
 
 After `bp_pipeline.py single-subject` creates a model package, connect it without rebuilding the viewer:
 

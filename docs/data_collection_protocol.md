@@ -101,6 +101,119 @@ The display-only command `python tools\view_live_hr.py --port COM3` is for demon
 
 Keep the finger PPG setup unchanged and record three 90-second trials. In each trial follow: 0-20 s still, 20-30 s gentle arm movement, 30-45 s still, 45-55 s larger movement, 55-70 s still, 70-80 s deliberate sensor disturbance, and 80-90 s still. Run `tools/calibrate_motion.py` on the three IMU CSV files. The tool uses a causal 100-sample RMS window and ignores guarded transition/recovery margins. Configure firmware only when at least 95% of guarded stationary time is classified still and at least 90% of guarded movement blocks are detected. Keep BPM suppression disabled regardless of the calibration result.
 
+## Upper-Arm Motion-Quality Study
+
+This protocol develops a BP-label-independent PPG quality classifier. It does not require an Omron cuff and must not be combined with cuff or BP-label options. It preserves the normal raw PPG, IMU, metadata and plots, and adds a separate `*_activity_annotations.csv` file driven by the same PC monotonic clock as acquisition.
+
+The 240-second `motion_quality_v1` schedule is:
+
+| Time | Activity |
+| --- | --- |
+| 0-30 s | Supported still baseline |
+| 30-60 s | Gentle movement of the sensor arm without touching the strap |
+| 60-90 s | Supported still recovery |
+| 90-120 s | Natural typing without touching the sensor |
+| 120-150 s | Supported still recovery |
+| 150-180 s | Seated torso and shoulder movement |
+| 180-210 s | Supported still recovery |
+| 210-240 s | Gentle strap-edge pressure/release without disconnecting hardware |
+
+The collector shows a five-second preparation countdown and prints each activity cue at the scheduled transition. Scheduled activity is not automatically equivalent to PPG corruption; review the resulting waveform later and assign separate `clean`, `motion_corrupted`, `contact_corrupted`, or `uncertain` quality labels.
+
+Example first pilot on COM5:
+
+```powershell
+& "C:\wjw\Anaconda\python.exe" tools\collect_ppg.py `
+  --port COM5 `
+  --duration 240 `
+  --subject P001 `
+  --session motion_quality_v1 `
+  --trial-id motion_quality_001 `
+  --posture seated `
+  --sensor-location left_outer_upper_arm_5cm_above_elbow `
+  --ppg-profile upper_arm_experimental `
+  --ppg-orientation leds_distal_photodiode_proximal `
+  --imu-location left_upper_arm_adjacent_to_ppg `
+  --imu-orientation x_distal_y_left_z_outward `
+  --motion-protocol motion_quality_v1 `
+  --notes "firmware=participant-study-fw-v1.0; BP-unlabelled motion-quality pilot"
+```
+
+Run three pilots with trial IDs `motion_quality_001`, `motion_quality_002`, and `motion_quality_003`. Do not add `--prompt-bp-after`, `--prompt-labels`, `--sbp`, `--dbp`, or other cuff options.
+
+### Prepare and review Stage 1 windows
+
+Run:
+
+```powershell
+& "C:\wjw\Anaconda\python.exe" tools\prepare_motion_quality.py prepare `
+  --config config\motion_quality_v1.json `
+  --input-dir data\raw `
+  --session motion_quality_v1 `
+  --output-dir data\processed\motion_quality_v1\stage1
+```
+
+The tool aligns PPG and IMU by ESP timestamps and creates deterministic eight-second windows every four seconds. It excludes the first/last five seconds, windows touching the two-second cue guards, and the first five seconds of each recovery block. Every candidate remains in `window_features.csv` with its exclusion or rejection reason. The 0.05 g firmware threshold is retained only as a diagnostic feature.
+
+Review `review_plots/*_overview.png` and the eight-window contact sheets. For each row in `window_review.csv`, assign one of:
+
+- `clean`: PPG pulse shape remains usable.
+- `motion_corrupted`: body or arm motion visibly corrupts the PPG.
+- `contact_corrupted`: pressure, strap, cable, DC step, dropout, or clipping corrupts contact.
+- `uncertain`: the evidence is ambiguous; do not force a label.
+
+Scheduled activity is context only and must not determine the review label. Do not use HR or BP labels and do not alter `window_id` or `window_features.csv`.
+
+Finalize the reviewed file with:
+
+```powershell
+& "C:\wjw\Anaconda\python.exe" tools\prepare_motion_quality.py finalize `
+  --config config\motion_quality_v1.json `
+  --run-dir data\processed\motion_quality_v1\stage1
+```
+
+Finalization verifies every reviewable window ID and the immutable feature-file checksum. `uncertain` remains in the audit output but is excluded from supervised training. Warnings for small class counts do not create or change labels.
+
+### Train the Stage 1 development classifier
+
+Run only after finalization:
+
+```powershell
+& "C:\wjw\Anaconda\python.exe" tools\train_motion_quality.py `
+  --config config\motion_quality_v1.json `
+  --run-dir data\processed\motion_quality_v1\stage1
+```
+
+Evaluation holds out one entire trial at a time. All preprocessing and model fitting occur on the other trials, so overlapping windows from one recording never cross an evaluation boundary. The output folder contains `evaluation_report.json`, `model_metrics.csv`, `fold_predictions.csv`, `feature_importance.csv`, the fitted development package and two diagnostic plots.
+
+The reviewed activity schedule, window timestamps, trial identity, automatic suggestions, HR and BP labels are not classifier inputs. The positive model class is `unusable`, which makes false-usable windows explicit in the report. Passing the P001 development gates is evidence that the implementation is ready for a new study; it is not independent or population validation and does not authorize live or firmware use.
+
+### Evaluate a frozen classifier
+
+After collecting and independently reviewing fresh validation trials, evaluate the saved development package without fitting it again:
+
+```powershell
+& "C:\wjw\Anaconda\python.exe" tools\evaluate_motion_quality.py `
+  --config config\motion_quality_v1.json `
+  --run-dir data\processed\motion_quality_v1\validation_v2 `
+  --model-package data\processed\motion_quality_v1\stage1\classifier_v1\motion_quality_classifier.joblib
+```
+
+The evaluation requires disjoint training and validation trial IDs and an exact configuration and feature-schema match. Passing requires balanced accuracy of at least 0.80, usable recall of at least 0.80 and unusable recall of at least 0.90. This same-participant evaluation checks repeatability on new recordings only; it does not validate generalization to other participants or permit automatic rejection in firmware.
+
+### Observe the classifier in shadow mode
+
+Add the frozen package to any upper-arm collector command:
+
+```powershell
+  --motion-quality-shadow-model data\processed\motion_quality_v1\stage1\classifier_v1\motion_quality_classifier.joblib `
+  --motion-quality-config config\motion_quality_v1.json
+```
+
+The PC waits for a completed eight-second window, extracts the same 38 PPG/IMU features used during training, and then scores a new window every four seconds. It writes a separate `*_motion_quality_shadow.csv` with the predicted class, unusable probability, window timing, completeness, model hash, and explicit `affects_bp_or_hr=false` field. Metadata records the model and configuration hashes and prediction counts. Raw PPG/IMU files and all existing firmware, HR and BP decisions are unchanged.
+
+Use these shadow records to compare predictions with later manual review and additional participants. Do not use them as automatic training labels.
+
 ## Upper-Arm Feasibility Phase
 
 - Keep the Omron cuff on the left upper arm.

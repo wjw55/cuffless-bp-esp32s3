@@ -285,6 +285,24 @@ class BPViewerTests(unittest.TestCase):
         self.assertEqual(buffer_duration_s(state), 0.0)
         self.assertIn("Estimated BP: --/--", render_screen(state, context, 87.1, "COM5", 115200))
 
+    def test_shadow_unusable_prediction_does_not_gate_bp(self):
+        state = BPViewerState(started_at=0.0)
+        add_still_data(state)
+        shadow = Mock()
+        shadow.result = Mock(prediction="unusable", status="unusable", unusable_probability=0.93)
+        state.motion_quality_shadow = shadow
+        context = ViewerContext("P001", 116, 72, config(), bundle=Mock(viewer_eligible=True))
+        result = BPInferenceResult(
+            "prediction_ready", "accepted", sbp=114, dbp=73, delta_sbp=-2, delta_dbp=1
+        )
+
+        self.assertTrue(maybe_predict(state, context, 86.0, predictor=lambda *_args: result))
+        screen = render_screen(state, context, 86.0, "COM5", 115200)
+
+        self.assertIn("Estimated BP: 114/73", screen)
+        self.assertIn("Prediction: Unusable", screen)
+        self.assertIn("Control effect: None", screen)
+
     def test_numeric_result_is_hidden_when_serial_data_is_stale(self):
         state = BPViewerState(started_at=0.0)
         add_still_data(state)
@@ -351,6 +369,18 @@ class BPViewerTests(unittest.TestCase):
         self.assertEqual(args.calibration_sbp, 116)
         with self.assertRaises(SystemExit), patch("sys.stderr", StringIO()):
             parse_args(["--port", "COM5", "--participant-id", "P001"])
+
+    def test_cli_accepts_optional_motion_quality_shadow_model(self):
+        args = parse_args(
+            [
+                "--port", "COM5",
+                "--participant-id", "P001",
+                "--calibration-sbp", "116",
+                "--calibration-dbp", "72",
+                "--motion-quality-shadow-model", "model.joblib",
+            ]
+        )
+        self.assertEqual(args.motion_quality_shadow_model, "model.joblib")
 
 
 class FakeSerialException(Exception):

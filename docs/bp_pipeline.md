@@ -110,6 +110,15 @@ After creating a model package with `single-subject`, connect it without rebuild
 
 The viewer requires approximately 85 seconds of continuous stationary upper-arm PPG within a 90-second rolling buffer. The shared occasion gate additionally requires 60 unique seconds from accepted windows. Movement, timestamp restarts, sequence gaps, I2C errors, or FIFO overflows clear the usable buffer and hide the previous result. A failing model remains hidden unless `--allow-unvalidated` is supplied; that override displays a prominent `UNVALIDATED DEVELOPMENT ESTIMATE` warning.
 
+An optional frozen motion-quality classifier can be displayed alongside BP in observation-only mode:
+
+```powershell
+  --motion-quality-shadow-model data\processed\motion_quality_v1\stage1\classifier_v1\motion_quality_classifier.joblib `
+  --motion-quality-config config\motion_quality_v1.json
+```
+
+Its eight-second `usable`/`unusable` result is visibly marked `SHADOW ONLY` and never enters the BP gate, resets the BP buffer, or changes an estimate. This separation is intentional while participant-independent validation remains incomplete.
+
 Only one program can own the serial port. Close `idf.py monitor`, the HR viewer, or any other serial program before starting the BP viewer.
 
 ### Optional reproducible live capture
@@ -134,6 +143,8 @@ To save normal raw data and the quality-gated BP updates from the same serial se
 ```
 
 This adds a separate `*_live_bp.csv` and model identifiers in metadata while leaving the raw PPG and IMU formats unchanged. The same default eligibility gate applies; use `--allow-unvalidated` only for an explicitly labelled development capture.
+
+Adding `--motion-quality-shadow-model ...` to the same command also saves `*_motion_quality_shadow.csv`. The two outputs share the serial session and timestamps, but the shadow classifier has no control effect.
 
 ## Interpretation
 

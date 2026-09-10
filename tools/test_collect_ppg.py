@@ -197,6 +197,8 @@ def make_args(**overrides):
         "live_upper_arm_validation": False,
         "live_bp_model_dir": None,
         "allow_unvalidated": False,
+        "motion_quality_shadow_model": None,
+        "motion_quality_config": "config/motion_quality_v1.json",
     }
     defaults.update(overrides)
     return Namespace(**defaults)
@@ -798,6 +800,14 @@ class OutputPathTests(unittest.TestCase):
         self.assertEqual(trial_1["zoom_plot"].name, "test_omron_pilot_001_omron_001_zoom_plot.png")
         self.assertEqual(trial_1["live_hr_csv"].name, "test_omron_pilot_001_omron_001_live_hr.csv")
         self.assertEqual(trial_1["live_bp_csv"].name, "test_omron_pilot_001_omron_001_live_bp.csv")
+        self.assertEqual(
+            trial_1["motion_quality_shadow_csv"].name,
+            "test_omron_pilot_001_omron_001_motion_quality_shadow.csv",
+        )
+        self.assertEqual(
+            trial_1["activity_annotations"].name,
+            "test_omron_pilot_001_omron_001_activity_annotations.csv",
+        )
 
     def test_existing_output_file_is_not_overwritten_by_default(self):
         with TemporaryDirectory() as tmpdir:
@@ -832,6 +842,116 @@ class OutputPathTests(unittest.TestCase):
         ])
 
         self.assertTrue(args.overwrite)
+
+    def test_parses_upper_arm_motion_quality_protocol(self):
+        args = parse_args([
+            "--port", "COM5",
+            "--duration", "240",
+            "--subject", "P001",
+            "--session", "motion_quality_v1",
+            "--trial-id", "motion_quality_001",
+            "--ppg-profile", "upper_arm_experimental",
+            "--imu-location", "left_upper_arm_adjacent_to_ppg",
+            "--imu-orientation", "x_distal_y_left_z_outward",
+            "--motion-protocol", "motion_quality_v1",
+        ])
+
+        self.assertEqual(args.motion_protocol, "motion_quality_v1")
+        self.assertEqual(args.duration, 240.0)
+
+    def test_parses_motion_quality_shadow_for_upper_arm(self):
+        args = parse_args([
+            "--port", "COM5",
+            "--duration", "90",
+            "--subject", "P001",
+            "--session", "shadow_v1",
+            "--trial-id", "shadow_001",
+            "--ppg-profile", "upper_arm_experimental",
+            "--motion-quality-shadow-model", "model.joblib",
+        ])
+
+        self.assertEqual(args.motion_quality_shadow_model, "model.joblib")
+
+    def test_motion_quality_shadow_rejects_finger_profile(self):
+        stderr = StringIO()
+        with self.assertRaises(SystemExit), redirect_stderr(stderr):
+            parse_args([
+                "--port", "COM5",
+                "--duration", "90",
+                "--subject", "P001",
+                "--session", "shadow_v1",
+                "--trial-id", "shadow_001",
+                "--motion-quality-shadow-model", "model.joblib",
+            ])
+        self.assertIn("upper_arm_experimental", stderr.getvalue())
+
+    def test_motion_protocol_rejects_wrong_duration(self):
+        stderr = StringIO()
+        with self.assertRaises(SystemExit), redirect_stderr(stderr):
+            parse_args([
+                "--port", "COM5",
+                "--duration", "90",
+                "--subject", "P001",
+                "--session", "motion_quality_v1",
+                "--trial-id", "motion_quality_001",
+                "--ppg-profile", "upper_arm_experimental",
+                "--imu-location", "left_upper_arm_adjacent_to_ppg",
+                "--imu-orientation", "x_distal_y_left_z_outward",
+                "--motion-protocol", "motion_quality_v1",
+            ])
+
+        self.assertIn("requires --duration 240", stderr.getvalue())
+
+    def test_motion_protocol_rejects_missing_imu_metadata(self):
+        stderr = StringIO()
+        with self.assertRaises(SystemExit), redirect_stderr(stderr):
+            parse_args([
+                "--port", "COM5",
+                "--duration", "240",
+                "--subject", "P001",
+                "--session", "motion_quality_v1",
+                "--trial-id", "motion_quality_001",
+                "--ppg-profile", "upper_arm_experimental",
+                "--motion-protocol", "motion_quality_v1",
+            ])
+
+        self.assertIn("requires --imu-location and --imu-orientation", stderr.getvalue())
+
+    def test_motion_protocol_rejects_bp_labels(self):
+        stderr = StringIO()
+        with self.assertRaises(SystemExit), redirect_stderr(stderr):
+            parse_args([
+                "--port", "COM5",
+                "--duration", "240",
+                "--subject", "P001",
+                "--session", "motion_quality_v1",
+                "--trial-id", "motion_quality_001",
+                "--ppg-profile", "upper_arm_experimental",
+                "--imu-location", "left_upper_arm_adjacent_to_ppg",
+                "--imu-orientation", "x_distal_y_left_z_outward",
+                "--motion-protocol", "motion_quality_v1",
+                "--sbp", "116",
+            ])
+
+        self.assertIn("cannot be combined with cuff/BP label options", stderr.getvalue())
+
+    def test_motion_protocol_rejects_live_viewer_modes(self):
+        stderr = StringIO()
+        with self.assertRaises(SystemExit), redirect_stderr(stderr):
+            parse_args([
+                "--port", "COM5",
+                "--duration", "240",
+                "--subject", "P001",
+                "--session", "motion_quality_v1",
+                "--trial-id", "motion_quality_001",
+                "--ppg-profile", "upper_arm_experimental",
+                "--imu-location", "left_upper_arm_adjacent_to_ppg",
+                "--imu-orientation", "x_distal_y_left_z_outward",
+                "--motion-protocol", "motion_quality_v1",
+                "--live-upper-arm-validation",
+            ])
+
+        self.assertIn("cannot be combined with a live HR or BP validation mode", stderr.getvalue())
 
     def test_parses_live_upper_arm_validation_mode(self):
         args = parse_args([

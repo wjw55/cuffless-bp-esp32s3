@@ -16,12 +16,21 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import math
 import re
 import subprocess
 import sys
 import time
 from datetime import datetime
 from pathlib import Path
+
+from motion_study_protocol import (
+    MOTION_PROTOCOLS,
+    MotionProtocolRun,
+    format_protocol_schedule,
+    get_motion_protocol,
+    write_motion_annotations,
+)
 
 
 ADC_MAX_VALUE = 0x3FFFF
@@ -37,6 +46,7 @@ MAX_FIRMWARE_MOTION_EVENTS = 600
 ADXL345_SCALE_G_PER_LSB = 0.0039
 ADXL345_SAMPLE_RATE_HZ = 100
 MOTION_MAD_MULTIPLIER = 6.0
+MOTION_PROTOCOL_COUNTDOWN_S = 5
 
 FIRMWARE_STATS_METADATA_KEYS = {
     "samples": "firmware_status_sample_count",
@@ -228,6 +238,23 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         action="store_true",
         help="Allow an explicitly labelled unvalidated BP model during live BP validation",
     )
+    parser.add_argument(
+        "--motion-quality-shadow-model",
+        help=(
+            "Run a frozen PPG/IMU quality classifier in observation-only shadow mode and "
+            "save a separate prediction CSV"
+        ),
+    )
+    parser.add_argument(
+        "--motion-quality-config",
+        default="config/motion_quality_v1.json",
+        help="Configuration paired with --motion-quality-shadow-model",
+    )
+    parser.add_argument(
+        "--motion-protocol",
+        choices=tuple(MOTION_PROTOCOLS),
+        help="Run a timed PPG/IMU motion study and save a separate activity-annotation CSV",
+    )
     args = parser.parse_args(argv)
     return validate_collection_args(args, parser)
 
@@ -273,6 +300,60 @@ def validate_collection_args(args: argparse.Namespace, parser: argparse.Argument
         if parser is not None:
             parser.error(message)
         raise SystemExit(f"ERROR: {message}")
+
+    if getattr(args, "motion_quality_shadow_model", None):
+        if args.ppg_profile != "upper_arm_experimental":
+            message = "--motion-quality-shadow-model requires --ppg-profile upper_arm_experimental"
+            if parser is not None:
+                parser.error(message)
+            raise SystemExit(f"ERROR: {message}")
+        if args.duration < 8.0:
+            message = "--motion-quality-shadow-model requires --duration of at least 8 seconds"
+            if parser is not None:
+                parser.error(message)
+            raise SystemExit(f"ERROR: {message}")
+
+    motion_protocol_name = getattr(args, "motion_protocol", None)
+    if motion_protocol_name:
+        protocol = get_motion_protocol(motion_protocol_name)
+        if getattr(args, "live_upper_arm_validation", False) or live_bp_model_dir:
+            message = "--motion-protocol cannot be combined with a live HR or BP validation mode"
+            if parser is not None:
+                parser.error(message)
+            raise SystemExit(f"ERROR: {message}")
+        if not math.isclose(args.duration, protocol.duration_s, rel_tol=0.0, abs_tol=0.01):
+            message = (
+                f"--motion-protocol {motion_protocol_name} requires --duration "
+                f"{protocol.duration_s:g}"
+            )
+            if parser is not None:
+                parser.error(message)
+            raise SystemExit(f"ERROR: {message}")
+        if args.ppg_profile != "upper_arm_experimental":
+            message = f"--motion-protocol {motion_protocol_name} requires --ppg-profile upper_arm_experimental"
+            if parser is not None:
+                parser.error(message)
+            raise SystemExit(f"ERROR: {message}")
+        if not args.imu_location.strip() or not args.imu_orientation.strip():
+            message = "--motion-protocol requires --imu-location and --imu-orientation"
+            if parser is not None:
+                parser.error(message)
+            raise SystemExit(f"ERROR: {message}")
+        cuff_inputs = (
+            args.systolic_mmHg,
+            args.diastolic_mmHg,
+            args.cuff_hr_bpm,
+            args.cuff_start_time_s,
+            args.cuff_reading_time_s,
+            args.label_sbp,
+            args.label_dbp,
+            args.label_omron_hr,
+        )
+        if args.prompt_bp_after or args.prompt_labels or any(value is not None for value in cuff_inputs):
+            message = "motion-quality protocols cannot be combined with cuff/BP label options"
+            if parser is not None:
+                parser.error(message)
+            raise SystemExit(f"ERROR: {message}")
 
     return args
 
@@ -516,10 +597,12 @@ def build_output_paths(outdir: Path, subject: str, session: str, trial_id: str) 
         "imu_csv": outdir / f"{prefix}_imu.csv",
         "live_hr_csv": outdir / f"{prefix}_live_hr.csv",
         "live_bp_csv": outdir / f"{prefix}_live_bp.csv",
+        "motion_quality_shadow_csv": outdir / f"{prefix}_motion_quality_shadow.csv",
         "metadata": outdir / f"{prefix}_metadata.json",
         "plot": outdir / f"{prefix}_plot.png",
         "zoom_plot": outdir / f"{prefix}_zoom_plot.png",
         "motion_plot": outdir / f"{prefix}_motion_plot.png",
+        "activity_annotations": outdir / f"{prefix}_activity_annotations.csv",
     }
 
 
@@ -1432,6 +1515,8 @@ def main() -> int:
     live_viewer = None
     live_bp_viewer = None
     live_bp_context = None
+    motion_quality_shadow = None
+    motion_quality_shadow_bundle = None
     if args.live_upper_arm_validation:
         try:
             import view_live_upper_arm_hr as live_viewer
@@ -1464,6 +1549,20 @@ def main() -> int:
         except (ImportError, ValueError, OSError) as exc:
             print(f"ERROR: Live BP validation could not load the model.\nDetails: {exc}", file=sys.stderr)
             return 2
+    if args.motion_quality_shadow_model:
+        try:
+            import motion_quality_shadow
+
+            motion_quality_shadow_bundle = motion_quality_shadow.load_shadow_bundle(
+                args.motion_quality_shadow_model,
+                args.motion_quality_config,
+            )
+        except (ImportError, ValueError, OSError) as exc:
+            print(
+                f"ERROR: Motion-quality shadow mode could not load the frozen model.\nDetails: {exc}",
+                file=sys.stderr,
+            )
+            return 2
 
     outdir = Path(args.outdir)
     outdir.mkdir(parents=True, exist_ok=True)
@@ -1479,10 +1578,12 @@ def main() -> int:
     imu_csv_path = output_paths["imu_csv"]
     live_hr_csv_path = output_paths["live_hr_csv"]
     live_bp_csv_path = output_paths["live_bp_csv"]
+    motion_quality_shadow_csv_path = output_paths["motion_quality_shadow_csv"]
     metadata_path = output_paths["metadata"]
     plot_path = output_paths["plot"]
     zoom_plot_path = output_paths["zoom_plot"]
     motion_plot_path = output_paths["motion_plot"]
+    activity_annotations_path = output_paths["activity_annotations"]
 
     rows: list[tuple[int, int, int, int]] = []
     imu_rows: list[tuple[int, int, int, int, int]] = []
@@ -1491,7 +1592,15 @@ def main() -> int:
     firmware_diagnostics = create_firmware_diagnostics()
     live_hr_records: list[dict] = []
     live_bp_records: list[dict] = []
+    motion_quality_shadow_records: list[dict] = []
     live_state = None
+    motion_quality_shadow_state = (
+        motion_quality_shadow.MotionQualityShadowState(motion_quality_shadow_bundle)
+        if motion_quality_shadow is not None and motion_quality_shadow_bundle is not None
+        else None
+    )
+    motion_protocol = get_motion_protocol(args.motion_protocol) if args.motion_protocol else None
+    motion_protocol_run = MotionProtocolRun(motion_protocol) if motion_protocol else None
 
     print(f"Opening {args.port} at {args.baud} baud...")
     try:
@@ -1506,6 +1615,16 @@ def main() -> int:
             time.sleep(SERIAL_STARTUP_DELAY_S)
             ser.reset_input_buffer()
 
+            if motion_protocol is not None:
+                print(f"\nMotion-study protocol: {motion_protocol.name}")
+                for schedule_line in format_protocol_schedule(motion_protocol):
+                    print(f"  {schedule_line}")
+                print("\nPrepare the supported arm. Recording starts after the countdown.")
+                for remaining in range(MOTION_PROTOCOL_COUNTDOWN_S, 0, -1):
+                    print(f"Starting in {remaining}...", flush=True)
+                    time.sleep(1.0)
+                ser.reset_input_buffer()
+
             recording_start = datetime.now().astimezone()
             recording_start_monotonic = time.monotonic()
             deadline = recording_start_monotonic + args.duration
@@ -1514,12 +1633,25 @@ def main() -> int:
                 live_state = live_viewer.UpperArmViewerState(started_at=recording_start_monotonic)
             elif live_bp_viewer is not None:
                 live_state = live_bp_viewer.BPViewerState(started_at=recording_start_monotonic)
+                live_state.motion_quality_shadow = motion_quality_shadow_state
             print(f"Recording for {args.duration:.2f} s. Press Ctrl+C to stop early and save.")
+            if motion_protocol_run is not None:
+                motion_protocol_run.update(0.0)
 
             while time.monotonic() < deadline:
                 raw_line = ser.readline()
                 now = time.monotonic()
+                if motion_protocol_run is not None:
+                    motion_protocol_run.update(now - recording_start_monotonic)
                 if not raw_line:
+                    if motion_quality_shadow_state is not None:
+                        if motion_quality_shadow.maybe_score_shadow(motion_quality_shadow_state):
+                            motion_quality_shadow_records.append(
+                                motion_quality_shadow.build_shadow_record(
+                                    motion_quality_shadow_state,
+                                    now - recording_start_monotonic,
+                                )
+                            )
                     if live_viewer is not None and live_state is not None and now >= next_live_update:
                         live_viewer.maybe_analyze(live_state, now)
                         live_hr_records.append(
@@ -1553,16 +1685,49 @@ def main() -> int:
                     live_viewer.update_state_from_line(live_state, line, now)
                 elif live_bp_viewer is not None and live_state is not None:
                     live_bp_viewer.update_state_from_line(live_state, line, now)
-                update_firmware_diagnostics(firmware_diagnostics, parse_firmware_status_line(line))
+                parsed_status = parse_firmware_status_line(line)
+                update_firmware_diagnostics(firmware_diagnostics, parsed_status)
+                if (
+                    motion_quality_shadow_state is not None
+                    and live_bp_viewer is None
+                    and parsed_status is not None
+                    and parsed_status[0] in {"stats", "imu_stats"}
+                ):
+                    motion_quality_shadow_state.add_health(*parsed_status)
                 imu_row = parse_imu_row(line)
                 if imu_row is not None:
                     imu_rows.append(imu_row)
+                    if motion_quality_shadow_state is not None and live_bp_viewer is None:
+                        motion_quality_shadow_state.add_imu(imu_row)
                 else:
                     row = parse_ppg_row(line)
                     if row is None:
                         ignored_lines += 1
                     else:
                         rows.append(row)
+                        if motion_quality_shadow_state is not None and live_bp_viewer is None:
+                            motion_quality_shadow_state.add_ppg(row)
+
+                if motion_quality_shadow_state is not None:
+                    if motion_quality_shadow.maybe_score_shadow(motion_quality_shadow_state):
+                        motion_quality_shadow_records.append(
+                            motion_quality_shadow.build_shadow_record(
+                                motion_quality_shadow_state,
+                                now - recording_start_monotonic,
+                            )
+                        )
+                        if live_viewer is None and live_bp_viewer is None:
+                            shadow_result = motion_quality_shadow_state.result
+                            probability = (
+                                f"{shadow_result.unusable_probability:.3f}"
+                                if shadow_result.unusable_probability is not None
+                                else "na"
+                            )
+                            print(
+                                "# mq_shadow "
+                                f"status={shadow_result.status} "
+                                f"unusable_probability={probability} affects_bp_or_hr=false"
+                            )
 
                 if live_viewer is not None and live_state is not None and now >= next_live_update:
                     live_viewer.maybe_analyze(live_state, now)
@@ -1614,6 +1779,27 @@ def main() -> int:
     if live_bp_viewer is not None:
         live_bp_df = pd.DataFrame(live_bp_records, columns=live_bp_viewer.VALIDATION_COLUMNS)
         live_bp_df.to_csv(live_bp_csv_path, index=False)
+    if motion_quality_shadow is not None:
+        motion_quality_shadow_df = pd.DataFrame(
+            motion_quality_shadow_records,
+            columns=motion_quality_shadow.SHADOW_COLUMNS,
+        )
+        motion_quality_shadow_df.to_csv(motion_quality_shadow_csv_path, index=False)
+
+    motion_annotation_rows: list[dict] = []
+    motion_protocol_observed_duration_s: float | None = None
+    if motion_protocol_run is not None:
+        motion_protocol_observed_duration_s = max(
+            0.0,
+            min(args.duration, time.monotonic() - locals().get("recording_start_monotonic", time.monotonic())),
+        )
+        motion_annotation_rows = motion_protocol_run.annotation_rows(
+            args.subject,
+            args.session,
+            args.trial_id,
+            motion_protocol_observed_duration_s,
+        )
+        write_motion_annotations(activity_annotations_path, motion_annotation_rows)
 
     summary = summarize(df, args.duration)
     imu_summary = summarize_imu(imu_df, args.duration)
@@ -1685,6 +1871,43 @@ def main() -> int:
                 ),
             }
         )
+    if motion_quality_shadow_state is not None and motion_quality_shadow_bundle is not None:
+        metadata.update(
+            {
+                "output_motion_quality_shadow_csv_filename": motion_quality_shadow_csv_path.name,
+                "output_motion_quality_shadow_csv_path": str(motion_quality_shadow_csv_path),
+                "pc_motion_quality_shadow_enabled": True,
+                "pc_motion_quality_shadow_affects_bp_or_hr": False,
+                "pc_motion_quality_shadow_prediction_count": motion_quality_shadow_state.prediction_count,
+                "pc_motion_quality_shadow_usable_count": motion_quality_shadow_state.usable_count,
+                "pc_motion_quality_shadow_unusable_count": motion_quality_shadow_state.unusable_count,
+                "pc_motion_quality_shadow_model_path": str(motion_quality_shadow_bundle.model_path),
+                "pc_motion_quality_shadow_model_name": motion_quality_shadow_bundle.model_name,
+                "pc_motion_quality_shadow_model_sha256": motion_quality_shadow_bundle.model_sha256,
+                "pc_motion_quality_shadow_config_sha256": motion_quality_shadow_bundle.config_sha256,
+                "pc_motion_quality_shadow_window_seconds": float(
+                    motion_quality_shadow_bundle.config["window_seconds"]
+                ),
+                "pc_motion_quality_shadow_step_seconds": float(
+                    motion_quality_shadow_bundle.config["window_step_seconds"]
+                ),
+            }
+        )
+    if motion_protocol is not None:
+        metadata.update(
+            {
+                "motion_study_protocol": motion_protocol.name,
+                "motion_study_protocol_schema_version": 1,
+                "motion_study_scheduled_duration_s": motion_protocol.duration_s,
+                "motion_study_observed_duration_s": motion_protocol_observed_duration_s,
+                "motion_study_annotation_filename": activity_annotations_path.name,
+                "motion_study_annotation_path": str(activity_annotations_path),
+                "motion_study_completed_block_count": sum(
+                    row["completion_status"] == "complete" for row in motion_annotation_rows
+                ),
+                "motion_study_activity_labels_are_bp_independent": True,
+            }
+        )
     metadata_path.write_text(json.dumps(metadata, indent=2) + "\n", encoding="utf-8")
 
     save_plot(df, plot_path, plt)
@@ -1728,6 +1951,18 @@ def main() -> int:
         )
         print(f"  live BP CSV: {live_bp_csv_path}")
         print(f"  live BP updates: {len(live_bp_records)} ({numeric_count} numeric)")
+    if motion_quality_shadow_state is not None:
+        print(f"  motion-quality shadow CSV: {motion_quality_shadow_csv_path}")
+        print(
+            "  motion-quality shadow predictions: "
+            f"{motion_quality_shadow_state.prediction_count} "
+            f"({motion_quality_shadow_state.usable_count} usable, "
+            f"{motion_quality_shadow_state.unusable_count} unusable; no control effect)"
+        )
+    if motion_protocol is not None:
+        completed_blocks = sum(row["completion_status"] == "complete" for row in motion_annotation_rows)
+        print(f"  motion annotations: {activity_annotations_path}")
+        print(f"  motion protocol blocks: {completed_blocks}/{len(motion_protocol.blocks)} complete")
 
     return 0
 
