@@ -10,6 +10,9 @@
 #include "live_hr.h"
 #include "max30102.h"
 #include "motion_status.h"
+#include "ppg_clock.h"
+
+_Static_assert(MAX30102_SAMPLE_PERIOD_US == PPG_CLOCK_PERIOD_US, "PPG clock period mismatch");
 
 #define I2C_MASTER_PORT I2C_NUM_0
 #define I2C_MASTER_SDA_IO 8
@@ -93,6 +96,11 @@ void app_main(void)
     uint32_t timestamp_resync_count = 0;
     uint32_t timestamp_correction_count = 0;
     uint32_t timestamp_lag_warning_count = 0;
+    uint32_t ppg_clock_adjustments = 0;
+    int64_t ppg_clock_adjustment_us = 0;
+    int64_t ppg_clock_last_phase_error_us = 0;
+    uint32_t ppg_clock_rejected_observations = 0;
+    int64_t last_ppg_clock_warning_us = 0;
     uint8_t latest_fifo_available = 0;
     bool timestamp_initialized = false;
     int64_t acquisition_start_time_us = 0;
@@ -189,7 +197,21 @@ void app_main(void)
             }
         }
 
-        if (samples > 0 && timestamp_initialized) {
+        if (samples > 0 && !timestamp_initialized) {
+            /* Timestamp the oldest queued sample, not the instant it is read.
+             * FIFO depth was just observed; no serial output intervenes. */
+            next_sample_timestamp_us = ppg_clock_oldest_us(esp_timer_get_time(), samples);
+            if (sample_seq == 0) {
+                acquisition_start_time_us = next_sample_timestamp_us;
+                last_stats_time_us = acquisition_start_time_us;
+            }
+            timestamp_initialized = true;
+            next_timestamp_lag_warning_us = TIMESTAMP_LAG_WARNING_STEP_US;
+            printf("# timestamp_sync event=%s sample_seq=%" PRIu64
+                   " timestamp_us=%" PRId64 "\n",
+                   (sample_seq == 0) ? "initial" : "resync_after_overflow",
+                   sample_seq, next_sample_timestamp_us);
+        } else if (samples > 0 && timestamp_initialized) {
             int64_t read_time_us = esp_timer_get_time();
             int64_t expected_latest_timestamp_us =
                 next_sample_timestamp_us + ((int64_t)(samples - 1) * MAX30102_SAMPLE_PERIOD_US);
@@ -212,6 +234,25 @@ void app_main(void)
                     next_timestamp_lag_warning_us += TIMESTAMP_LAG_WARNING_STEP_US;
                 }
             }
+            /* Observe BEFORE printing/draining samples, so UART work cannot
+             * shift this FIFO observation. Large anomalies are not corrected. */
+            ppg_clock_observation_t clock = ppg_clock_observe(
+                next_sample_timestamp_us, last_emitted_timestamp_us, read_time_us, samples);
+            ppg_clock_last_phase_error_us = clock.phase_error_us;
+            if (clock.rejected) {
+                ppg_clock_rejected_observations++;
+                if (last_ppg_clock_warning_us == 0 || read_time_us - last_ppg_clock_warning_us >= 1000000) {
+                    printf("# warning event=ppg_clock_observation_rejected phase_error_us=%" PRId64
+                           " count=%" PRIu32 "\n", clock.phase_error_us, ppg_clock_rejected_observations);
+                    last_ppg_clock_warning_us = read_time_us;
+                }
+            } else {
+                next_sample_timestamp_us = clock.next_us;
+                if (clock.adjustment_us != 0) {
+                    ppg_clock_adjustments++;
+                    ppg_clock_adjustment_us += clock.adjustment_us;
+                }
+            }
         }
 
         while (samples > 0) {
@@ -219,20 +260,6 @@ void app_main(void)
             uint32_t ir = 0;
 
             if (max30102_read_fifo_sample(&red, &ir) == ESP_OK) {
-                if (!timestamp_initialized) {
-                    next_sample_timestamp_us = esp_timer_get_time();
-                    if (sample_seq == 0) {
-                        acquisition_start_time_us = next_sample_timestamp_us;
-                        last_stats_time_us = acquisition_start_time_us;
-                    }
-                    timestamp_initialized = true;
-                    next_timestamp_lag_warning_us = TIMESTAMP_LAG_WARNING_STEP_US;
-                    printf("# timestamp_sync event=%s sample_seq=%" PRIu64
-                           " timestamp_us=%" PRId64 "\n",
-                           (sample_seq == 0) ? "initial" : "resync_after_overflow",
-                           sample_seq,
-                           next_sample_timestamp_us);
-                }
 
                 // Finger detection: keep CSV clean; IR consistently below this threshold means no finger/poor contact.
                 bool finger_present = (ir > MAX30102_FINGER_IR_THRESHOLD);
@@ -250,8 +277,8 @@ void app_main(void)
 
                 int64_t timestamp_us = next_sample_timestamp_us;
                 if (last_emitted_timestamp_us >= 0 &&
-                    timestamp_us < (last_emitted_timestamp_us + MAX30102_SAMPLE_PERIOD_US)) {
-                    timestamp_us = last_emitted_timestamp_us + MAX30102_SAMPLE_PERIOD_US;
+                    timestamp_us < (last_emitted_timestamp_us + PPG_CLOCK_MIN_SPACING_US)) {
+                    timestamp_us = last_emitted_timestamp_us + PPG_CLOCK_MIN_SPACING_US;
                     next_sample_timestamp_us = timestamp_us;
                     timestamp_correction_count++;
                     printf("# warning event=timestamp_correction sample_seq=%" PRIu64
@@ -452,7 +479,9 @@ void app_main(void)
                    " fifo_avail=%u ovf=%" PRIu32 " i2c_errors=%" PRIu32
                    " timestamp_resyncs=%" PRIu32 " timestamp_corrections=%" PRIu32
                    " timestamp_lag_warnings=%" PRIu32
-                   " overflow_recoveries=%" PRIu32 "\n",
+                   " overflow_recoveries=%" PRIu32
+                   " clock_adjustments=%" PRIu32 " clock_adjustment_us=%" PRId64
+                   " clock_phase_error_us=%" PRId64 " clock_rejected_observations=%" PRIu32 "\n",
                    sample_seq,
                    sample_seq,
                    rate_tenths_hz / 10,
@@ -465,7 +494,9 @@ void app_main(void)
                    timestamp_resync_count,
                    timestamp_correction_count,
                    timestamp_lag_warning_count,
-                   overflow_recovery_count);
+                   overflow_recovery_count,
+                   ppg_clock_adjustments, ppg_clock_adjustment_us,
+                   ppg_clock_last_phase_error_us, ppg_clock_rejected_observations);
 
             if (imu_enabled) {
                 uint64_t imu_samples_since_last_status = imu_sample_seq - last_stats_imu_sample_seq;

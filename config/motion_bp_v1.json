@@ -1,0 +1,20 @@
+{
+  "schema_version": 1,
+  "research_only": true,
+  "deployment_eligible": false,
+  "quality_config": "motion_quality_v1.json",
+  "maximum_timestamp_lag_ms": 20.0,
+  "maximum_gap_ms": 20.0,
+  "severity_thresholds_provisional": true,
+  "dynamic_rms_boundaries_g": [0.02, 0.08, 0.2],
+  "movement_threshold_g": 0.02,
+  "minimum_contact_counts": 50000.0,
+  "maximum_clipping_fraction": 0.005,
+  "minimum_template_correlation": 0.6,
+  "maximum_ibi_cv": 0.2,
+  "minimum_valid_beats": 4,
+  "ridge_alpha": 10.0,
+  "interval_coverage": 0.9,
+  "minimum_uncertainty_groups": 10,
+  "maximum_interval_half_width_mmhg": 10.0
+}

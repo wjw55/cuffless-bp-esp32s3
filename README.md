@@ -2,6 +2,15 @@
 
 Synchronized raw PPG and motion acquisition firmware for an ESP32-S3, MAX30102, and optional ADXL345. The ADXL345 is used to flag general body/arm motion that may corrupt PPG; it is not a blood-pressure model input.
 
+For the separate, offline-only IMU-informed BP development path, see
+[motion-aware BP development](docs/motion_bp_pipeline.md). This experimental path
+does not enable live BP during movement or change the stationary baseline.
+
+The current development firmware includes [PPG timestamp tracking](docs/ppg_timestamp_tracking.md).
+It is not a replacement participant-study firmware freeze. PPG timestamps now
+track the observed clock with bounded corrections; do not assume exact 10 ms
+spacing from the nominal 100 Hz setting.
+
 ## Wiring
 
 | MAX30102 breakout | ESP32-S3 |
@@ -267,7 +276,7 @@ sample_seq,timestamp_ms,red,ir
 ```
 
 - `sample_seq`: monotonically increasing firmware sample counter.
-- `timestamp_ms`: ESP timer timestamp in milliseconds. The first captured sample initializes the firmware timestamp cursor, then each emitted sample advances by the nominal 10 ms period.
+- `timestamp_ms`: ESP timer-based timestamp in milliseconds. The development build backdates FIFO batches and applies bounded clock tracking; the nominal period is 10 ms. The archived participant-study firmware uses the earlier fixed-period cursor.
 - `red`: raw MAX30102 red channel ADC value.
 - `ir`: raw MAX30102 IR channel ADC value.
 

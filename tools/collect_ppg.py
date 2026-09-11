@@ -59,6 +59,10 @@ FIRMWARE_STATS_METADATA_KEYS = {
     "timestamp_resyncs": "firmware_timestamp_resync_count",
     "timestamp_corrections": "firmware_timestamp_correction_count",
     "timestamp_lag_warnings": "firmware_timestamp_lag_warning_count",
+    "clock_adjustments": "firmware_clock_adjustment_count",
+    "clock_adjustment_us": "firmware_clock_adjustment_total_us",
+    "clock_phase_error_us": "firmware_clock_phase_error_us",
+    "clock_rejected_observations": "firmware_clock_rejected_observation_count",
     "overflow_recoveries": "firmware_fifo_overflow_recovery_count",
 }
 
