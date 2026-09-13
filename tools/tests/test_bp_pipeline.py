@@ -7,7 +7,7 @@ from tempfile import TemporaryDirectory
 import numpy as np
 import pandas as pd
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from bp_core.datasets import Recording, SignalData, audit_datasets, discover_recordings
 from bp_core.features import (

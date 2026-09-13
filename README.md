@@ -1,6 +1,6 @@
 # ESP32-S3 MAX30102 PPG + ADXL345 Motion Logger
 
-Synchronized raw PPG and motion acquisition firmware for an ESP32-S3, MAX30102, and optional ADXL345. The ADXL345 is used to flag general body/arm motion that may corrupt PPG; it is not a blood-pressure model input.
+Synchronized raw PPG and motion acquisition firmware for an ESP32-S3, MAX30102, and optional ADXL345. The validated path uses the ADXL345 as a signal-quality flag; a separate offline research path tests whether its features improve BP estimates during non-severe motion.
 
 For the separate, offline-only IMU-informed BP development path, see
 [motion-aware BP development](docs/motion_bp_pipeline.md). This experimental path
@@ -10,6 +10,8 @@ The current development firmware includes [PPG timestamp tracking](docs/ppg_time
 It is not a replacement participant-study firmware freeze. PPG timestamps now
 track the observed clock with bounded corrections; do not assume exact 10 ms
 spacing from the nominal 100 Hz setting.
+
+The PC utilities are grouped by workflow in the [tool catalogue](tools/README.md). User-facing collection, analysis and viewer command paths remain unchanged; regression tests are contained in `tools/tests/`.
 
 ## Wiring
 
@@ -227,6 +229,33 @@ Evaluate the frozen development package on a separately finalized validation run
 
 The evaluator rejects training/validation trial overlap and incompatible configurations or feature schemas. It records model-package hashes before and after prediction and reports balanced accuracy, usable recall and unusable recall. The validation command never fits a model. Same-participant trial validation does not establish participant-independent or population performance and does not enable deployment by itself.
 
+### Motion-intensity diagnostics (Stage 1)
+
+`config\motion_quality_v2.json` adds four automatically derived context bands: `stationary`, `mild`, `moderate`, and `severe`. They use the mean of the existing causal one-second rolling-RMS activity signal with provisional boundaries of 0.02, 0.08, and 0.20 g. The bands never use scheduled activity, reviewed PPG quality, HR, SBP, or DBP labels. They are diagnostic strata, not new ground-truth quality labels or permission to display BP.
+
+The v1 configuration and its frozen shadow package remain unchanged. Existing finalized review tables can be reused without relabelling because v2 derives each band from the already saved `imu_activity_mean_g` feature in memory. Train a separate v2 development package and evaluate it on the existing disjoint trial set:
+
+```powershell
+& "C:\wjw\Anaconda\python.exe" tools\train_motion_quality.py `
+  --config config\motion_quality_v2.json `
+  --run-dir data\processed\motion_quality_v1\stage1 `
+  --output-dir data\processed\motion_quality_v1\stage1\classifier_v2
+
+& "C:\wjw\Anaconda\python.exe" tools\evaluate_motion_quality.py `
+  --config config\motion_quality_v2.json `
+  --run-dir data\processed\motion_quality_v1\validation_v2 `
+  --model-package data\processed\motion_quality_v1\stage1\classifier_v2\motion_quality_classifier.joblib `
+  --output-dir data\processed\motion_quality_v1\validation_v2\classifier_validation_v2
+```
+
+Both commands save per-band balanced accuracy, usable recall, unusable recall, and reviewed usable-time coverage. Coverage is calculated from the union of window intervals within each trial, so overlapping eight-second windows are not counted twice. A metric is `null`/`na` when a band lacks either usable or unusable reviewed examples; the tool does not invent a two-class score. Severe motion remains designated unavailable for future BP work, but this Stage 1 analysis does not alter firmware, the stationary BP pipeline, the shadow classifier, HR, or either live viewer.
+
+### PPG-only versus PPG+IMU BP comparison (Stage 2)
+
+The separate `tools\motion_bp_pipeline.py` path now uses the same Stage 1 motion bands and compares fixed Ridge regressors using PPG-only, PPG plus motion intensity, and PPG plus the full IMU/cross-modal feature set. It reports SBP/DBP error on identical commonly accepted windows and accepted unique-time coverage for every band. Severe-motion windows always remain unavailable. See [the motion-aware BP protocol](docs/motion_bp_pipeline.md) for audit, extraction, split and evaluation commands.
+
+This is software readiness, not a motion-BP result. The current Omron-after-recording labels cannot truthfully label individual movement windows, so numeric comparison requires synchronized, independently reviewed continuous BP reference data. The firmware, stationary model and live viewers remain unchanged.
+
 The frozen classifier can next be observed during normal upper-arm collection without controlling any result. Add these options to an existing collector command:
 
 ```powershell
@@ -424,6 +453,22 @@ A separate retrospective single-participant command uses forward chronological d
 ```
 
 See [docs/bp_pipeline.md](docs/bp_pipeline.md) for dataset locations, outputs, resume behavior, and interpretation rules.
+
+### Public continuous-BP short-window feasibility
+
+A separate Graphene adapter compares 20-, 30-, 60- and approximately 85-second PPG morphology observations against synchronized Finapres BP. It uses only fingertip PPG and Finapres channels—never ECG, Bio-Z, PAT or PTT—and does not produce a viewer model:
+
+```powershell
+& "C:\wjw\Anaconda\python.exe" tools\graphene_ppg_bp.py audit `
+  --config config\graphene_ppg_bp_v1.json `
+  --output-dir data\processed\graphene_ppg_bp\audit_001
+
+& "C:\wjw\Anaconda\python.exe" tools\graphene_ppg_bp.py run `
+  --config config\graphene_ppg_bp_v1.json `
+  --output-dir data\processed\graphene_ppg_bp\run_001
+```
+
+This is source-domain research only. It can guide the local recovery experiment but cannot validate upper-arm or motion-compensated BP. See [docs/graphene_ppg_bp.md](docs/graphene_ppg_bp.md).
 
 ## Experimental PC BP Viewer
 

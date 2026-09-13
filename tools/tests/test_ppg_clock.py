@@ -6,7 +6,7 @@ import subprocess
 import tempfile
 import unittest
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[2]
 
 
 class PPGClockCTests(unittest.TestCase):
@@ -17,7 +17,7 @@ class PPGClockCTests(unittest.TestCase):
             if gcc:
                 binary = output / ('clock.exe' if os.name == 'nt' else 'clock')
                 subprocess.run([gcc, '-std=c11', '-O2', '-I', str(ROOT/'main'),
-                    str(ROOT/'main/ppg_clock.c'), str(ROOT/'tools/test_ppg_clock.c'), '-o', str(binary)], check=True, capture_output=True)
+                    str(ROOT/'main/ppg_clock.c'), str(ROOT/'tools/tests/test_ppg_clock.c'), '-o', str(binary)], check=True, capture_output=True)
             elif os.name == 'nt':
                 base = Path(os.environ.get('ProgramFiles', 'C:/Program Files')) / 'Microsoft Visual Studio/2022/Community/VC/Tools/MSVC'
                 versions = sorted(base.glob('*/bin/Hostx64/x64/cl.exe'))
@@ -29,7 +29,7 @@ class PPGClockCTests(unittest.TestCase):
                 include = compiler.parents[3] / 'include'
                 env = dict(os.environ, INCLUDE=str(include)+';'+str(ucrt[-1]))
                 objects = []
-                for source in (ROOT/'main/ppg_clock.c', ROOT/'tools/test_ppg_clock.c'):
+                for source in (ROOT/'main/ppg_clock.c', ROOT/'tools/tests/test_ppg_clock.c'):
                     obj = output/(source.stem+'.obj')
                     subprocess.run([str(compiler), '/nologo', '/O2', '/GS-', '/I'+str(ROOT/'main'),
                         '/c', str(source), '/Fo'+str(obj)], check=True, capture_output=True, env=env)

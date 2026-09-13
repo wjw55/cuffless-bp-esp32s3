@@ -6,7 +6,7 @@ from io import StringIO
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from calibrate_motion import (
     CLEAN_STILL_INTERVALS,

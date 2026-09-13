@@ -10,7 +10,7 @@ import numpy as np
 import pandas as pd
 from sklearn.linear_model import LogisticRegression
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from motion_quality_shadow import (
     MotionQualityShadowState,
@@ -21,7 +21,7 @@ from motion_quality_shadow import (
 )
 
 
-CONFIG_PATH = Path(__file__).resolve().parents[1] / "config" / "motion_quality_v1.json"
+CONFIG_PATH = Path(__file__).resolve().parents[2] / "config" / "motion_quality_v1.json"
 
 
 def write_model(path: Path, config_path: Path = CONFIG_PATH) -> Path:

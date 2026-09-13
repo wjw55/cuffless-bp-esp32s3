@@ -13,7 +13,7 @@ import numpy as np
 import pandas as pd
 from sklearn.dummy import DummyRegressor
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from bp_core.inference import ModelCompatibilityError, load_model_bundle, predict_frame
 from view_live_bp import (

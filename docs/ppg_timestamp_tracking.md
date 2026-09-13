@@ -46,10 +46,10 @@ participant firmware or using cross-modal BP results.
 
 ## Verification
 
-`tools/test_ppg_clock.c` executes the actual firmware clock implementation over
+`tools/tests/test_ppg_clock.c` executes the actual firmware clock implementation over
 ten-minute simulated slow/fast clocks, polling jitter and FIFO batches, and checks
 monotonicity, bounded timestamp error, invalid depth, large latency rejection and
-reinitialization. `tools/test_ppg_clock.py` builds/runs it using GCC or the installed
+reinitialization. `tools/tests/test_ppg_clock.py` builds/runs it using GCC or the installed
 MSVC host compiler as part of the Python regression suite. It explicitly skips
 when no host compiler is available; require a successful C test before flashing.
 

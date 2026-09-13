@@ -8,7 +8,7 @@ from tempfile import TemporaryDirectory
 import numpy as np
 import pandas as pd
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from analyze_trials import (
     build_summary_row,

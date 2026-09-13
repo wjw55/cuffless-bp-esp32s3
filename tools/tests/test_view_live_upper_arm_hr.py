@@ -6,7 +6,7 @@ from types import SimpleNamespace
 import sys
 from unittest.mock import Mock, patch
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from view_live_upper_arm_hr import (
     MINIMUM_ANALYSIS_SECONDS,
