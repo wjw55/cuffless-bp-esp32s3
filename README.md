@@ -506,6 +506,20 @@ After `bp_pipeline.py single-subject` creates a model package, connect it withou
 
 Numeric BP is enabled by default only if both SBP and DBP models beat the zero-change baseline on the locked test. `--allow-unvalidated` permits an explicitly labelled development estimate; it must not be presented as validated BP. See [docs/bp_pipeline.md](docs/bp_pipeline.md) for offline prediction and optional collector capture commands.
 
+The normal viewer still requires 85 seconds of continuous `Still` data. For development demonstrations only, `--experimental-fast-window 30` attempts a quality-gated estimate from the latest 30 seconds and then falls back to the unchanged 85-second policy if short-window quality is insufficient:
+
+```powershell
+& "C:\wjw\Anaconda\python.exe" tools\view_live_bp.py `
+  --port COM5 `
+  --participant-id P001 `
+  --model-dir data\processed\bp\<run_id>\single_subject\P001 `
+  --experimental-fast-window 30
+```
+
+Fast estimates are prominently labelled `EXPERIMENTAL FAST ESTIMATE`. The completed P001 development replay recovered after the final `Still` state in approximately 30–34 seconds in four recovery trials, but retained only 71.2% of standard-policy updates against an 80% target. The option is therefore not the default and is not a validation claim.
+
+The viewer now also shows the configured IMU intensity as `Stationary`, `Mild`, `Moderate`, `Severe` or `Unknown`. The first four are the shared Stage 1 diagnostic bands; `Unknown` covers warm-up, stale or unavailable data. This display does not change BP behavior: firmware `Still`/`Moving` remains the controlling safety gate, and BP is still hidden whenever `Moving` is reported.
+
 Before BP features enter training or prediction, one shared occasion-level gate now checks raw PPG sequence/timestamp continuity, all reported PPG/IMU I2C and FIFO counters, the conservative upper-arm analyzer, motion/contact masks, the configurable accepted-window minimum, and at least 60 seconds of unique clean coverage. Overlapping 8-second windows are unioned rather than counted repeatedly. Rejected occasions and their explicit reasons are saved in `rejected_occasions.csv`.
 
 The examined P001 run `data/processed/bp/20260904T180300` is development-only: its former locked test is no longer untouched, `viewer_eligible` remains false, and it must not be claimed as validation. Freeze the strengthened pipeline first, then evaluate it once on a newly collected chronological test set.

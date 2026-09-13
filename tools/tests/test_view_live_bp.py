@@ -15,13 +15,20 @@ from sklearn.dummy import DummyRegressor
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from bp_core.inference import ModelCompatibilityError, load_model_bundle, predict_frame
+from bp_core.inference import (
+    ModelCompatibilityError,
+    load_model_bundle,
+    make_short_window_bundle,
+    predict_frame,
+)
 from view_live_bp import (
     BPInferenceResult,
     BPViewerState,
+    LiveMotionIntensityState,
     ViewerContext,
     buffer_duration_s,
     build_validation_record,
+    live_motion_intensity,
     maybe_predict,
     parse_args,
     render_screen,
@@ -59,6 +66,27 @@ def config():
             "contact_margin_seconds": 2.0,
         },
         "models": {"bootstrap_iterations": 10},
+    }
+
+
+def intensity_config():
+    return {
+        "schema_version": 2,
+        "window_seconds": 8.0,
+        "window_step_seconds": 4.0,
+        "timing": {"minimum_completeness": 0.995},
+        "imu": {
+            "scale_g_per_lsb": 0.0039,
+            "gravity_alpha": 0.01,
+            "activity_window_samples": 100,
+            "firmware_motion_threshold_g": 0.05,
+        },
+        "motion_intensity": {
+            "source_feature": "imu_activity_mean_g",
+            "boundaries_g": [0.02, 0.08, 0.2],
+            "labels": ["stationary", "mild", "moderate", "severe"],
+            "severe_policy": "unavailable",
+        },
     }
 
 
@@ -144,6 +172,27 @@ def add_still_data(state: BPViewerState, duration_s=86.0):
 
 
 class BPInferenceTests(unittest.TestCase):
+    def test_short_window_bundle_changes_only_in_memory_quality_policy(self):
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            write_model_dir(root, eligible=True)
+            bundle = load_model_bundle(root)
+
+            short = make_short_window_bundle(bundle, 30)
+
+            self.assertEqual(
+                short.config["quality"]["minimum_accepted_windows_per_occasion"], 3
+            )
+            self.assertEqual(
+                short.config["quality"]["minimum_unique_clean_coverage_seconds"], 24.0
+            )
+            self.assertFalse(short.config["quality"]["require_upper_arm_analyzer_acceptance"])
+            self.assertEqual(
+                bundle.config["quality"]["minimum_unique_clean_coverage_seconds"], 60.0
+            )
+            self.assertTrue(short.viewer_eligible)
+            self.assertFalse(short.allow_unvalidated)
+
     def test_eligible_model_produces_quality_gated_prediction(self):
         with TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -257,6 +306,118 @@ class BPInferenceTests(unittest.TestCase):
 
 
 class BPViewerTests(unittest.TestCase):
+    def test_live_motion_intensity_uses_causal_eight_second_imu_history(self):
+        state = BPViewerState(started_at=0.0)
+        state.motion_intensity = LiveMotionIntensityState(intensity_config())
+        for index in range(801):
+            update_state_from_line(
+                state,
+                f"imu,{index},{index * 10},0,0,256",
+                index / 100.0,
+            )
+
+        band, activity = live_motion_intensity(state, 8.0)
+
+        self.assertEqual(band, "stationary")
+        self.assertIsNotNone(activity)
+        self.assertLess(activity, 0.02)
+
+    def test_live_motion_intensity_is_unknown_during_warmup_or_when_stale(self):
+        state = BPViewerState(started_at=0.0)
+        state.motion_intensity = LiveMotionIntensityState(intensity_config())
+        update_state_from_line(state, "imu,0,0,0,0,256", 0.0)
+
+        self.assertEqual(live_motion_intensity(state, 0.0), ("unknown", None))
+        self.assertEqual(live_motion_intensity(state, 4.0), ("unknown", None))
+
+    def test_motion_intensity_display_does_not_replace_binary_bp_gate(self):
+        state = BPViewerState(started_at=0.0)
+        state.motion_intensity = LiveMotionIntensityState(intensity_config())
+        state.motion_intensity.band = "mild"
+        state.motion_intensity.mean_activity_g = 0.04
+        state.motion_intensity.last_update_at = 10.0
+        update_state_from_line(
+            state,
+            "# motion timestamp_ms=10000 status=moving activity_g=0.04 threshold_g=0.05",
+            10.0,
+        )
+        context = ViewerContext("P001", 116, 72, config())
+
+        screen = render_screen(state, context, 10.0, "COM5", 115200)
+
+        self.assertIn("Motion detected", screen)
+        self.assertIn("Motion intensity: Mild", screen)
+        self.assertIn("Display only; Still/Moving remains the BP gate", screen)
+
+    def test_default_mode_still_requires_85_seconds(self):
+        state = BPViewerState(started_at=0.0)
+        add_still_data(state, duration_s=31.0)
+        context = ViewerContext("P001", 116, 72, config(), bundle=Mock(viewer_eligible=True))
+        predictor = Mock()
+
+        self.assertFalse(maybe_predict(state, context, 31.0, predictor=predictor))
+        predictor.assert_not_called()
+        self.assertEqual(state.result.status, "warming_up")
+        self.assertIn("31.0/85 s", state.result.reason)
+
+    def test_opt_in_fast_mode_uses_only_trailing_30_seconds(self):
+        state = BPViewerState(started_at=0.0)
+        add_still_data(state, duration_s=35.0)
+        standard_bundle = Mock(viewer_eligible=True)
+        fast_bundle = Mock(viewer_eligible=True)
+        context = ViewerContext(
+            "P001",
+            116,
+            72,
+            config(),
+            bundle=standard_bundle,
+            experimental_fast_window_seconds=30.0,
+            experimental_fast_bundle=fast_bundle,
+        )
+        observed = {}
+
+        def predictor(bundle, frame, metadata):
+            observed["bundle"] = bundle
+            observed["span"] = (frame.timestamp_ms.iloc[-1] - frame.timestamp_ms.iloc[0]) / 1000
+            observed["motion_updates"] = metadata["firmware_motion_updates"]
+            return BPInferenceResult(
+                "prediction_ready", "accepted", sbp=114, dbp=73, delta_sbp=-2, delta_dbp=1
+            )
+
+        self.assertTrue(maybe_predict(state, context, 35.0, predictor=predictor))
+        self.assertIs(observed["bundle"], fast_bundle)
+        self.assertLessEqual(observed["span"], 30.0)
+        self.assertEqual(state.result.status, "experimental_fast_estimate")
+        screen = render_screen(state, context, 35.0, "COM5", 115200)
+        self.assertIn("EXPERIMENTAL FAST ESTIMATE", screen)
+        self.assertIn("Standard fallback: 85 s", screen)
+
+    def test_fast_mode_switches_back_to_standard_policy_at_85_seconds(self):
+        state = BPViewerState(started_at=0.0)
+        add_still_data(state, duration_s=86.0)
+        standard_bundle = Mock(viewer_eligible=True)
+        fast_bundle = Mock(viewer_eligible=True)
+        context = ViewerContext(
+            "P001",
+            116,
+            72,
+            config(),
+            bundle=standard_bundle,
+            experimental_fast_window_seconds=30.0,
+            experimental_fast_bundle=fast_bundle,
+        )
+        observed = {}
+
+        def predictor(bundle, frame, _metadata):
+            observed["bundle"] = bundle
+            observed["span"] = (frame.timestamp_ms.iloc[-1] - frame.timestamp_ms.iloc[0]) / 1000
+            return BPInferenceResult("prediction_ready", "accepted", sbp=114, dbp=73)
+
+        self.assertTrue(maybe_predict(state, context, 86.0, predictor=predictor))
+        self.assertIs(observed["bundle"], standard_bundle)
+        self.assertGreater(observed["span"], 85.0)
+        self.assertEqual(state.result.status, "prediction_ready")
+
     def test_pending_mode_never_calls_predictor_or_displays_bp(self):
         state = BPViewerState(started_at=0.0)
         add_still_data(state)
@@ -381,6 +542,27 @@ class BPViewerTests(unittest.TestCase):
             ]
         )
         self.assertEqual(args.motion_quality_shadow_model, "model.joblib")
+
+    def test_cli_fast_window_is_opt_in_and_requires_model(self):
+        args = parse_args(
+            [
+                "--port", "COM5",
+                "--participant-id", "P001",
+                "--model-dir", "model",
+                "--experimental-fast-window", "30",
+            ]
+        )
+        self.assertEqual(args.experimental_fast_window, 30)
+        with self.assertRaises(SystemExit), patch("sys.stderr", StringIO()):
+            parse_args(
+                [
+                    "--port", "COM5",
+                    "--participant-id", "P001",
+                    "--calibration-sbp", "116",
+                    "--calibration-dbp", "72",
+                    "--experimental-fast-window", "30",
+                ]
+            )
 
 
 class FakeSerialException(Exception):

@@ -4,13 +4,15 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import math
 import sys
 import time
 from collections import deque
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Callable
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 
 from bp_core.config import load_config
@@ -19,6 +21,7 @@ from bp_core.inference import (
     BPModelBundle,
     ModelCompatibilityError,
     load_model_bundle,
+    make_short_window_bundle,
     predict_frame,
 )
 from collect_ppg import parse_firmware_status_line, parse_imu_row, parse_ppg_row
@@ -29,6 +32,11 @@ from motion_quality_shadow import (
     load_shadow_bundle,
     maybe_score_shadow,
 )
+from motion_quality import (
+    classify_motion_intensity,
+    load_config as load_motion_intensity_config,
+    motion_intensity_settings,
+)
 
 
 DEFAULT_BAUD_RATE = 115200
@@ -36,6 +44,7 @@ DEFAULT_REFRESH_SECONDS = 1.0
 SERIAL_STARTUP_DELAY_SECONDS = 1.0
 ROLLING_BUFFER_SECONDS = 90.0
 MINIMUM_ANALYSIS_SECONDS = 85.0
+EXPERIMENTAL_FAST_WINDOW_SECONDS = 30.0
 ANALYSIS_PERIOD_SECONDS = 5.0
 ANALYSIS_STALE_SECONDS = 12.0
 MOTION_STALE_SECONDS = 3.0
@@ -77,6 +86,7 @@ STATUS_LABELS = {
     "model_incompatible": "Model incompatible",
     "model_validation_failed": "Model validation failed",
     "prediction_ready": "Experimental estimate",
+    "experimental_fast_estimate": "EXPERIMENTAL FAST ESTIMATE",
     "unvalidated_estimate": "UNVALIDATED DEVELOPMENT ESTIMATE",
     "motion_detected": "Motion detected",
     "motion_stale": "Motion update stale",
@@ -104,6 +114,71 @@ class ViewerContext:
     allow_unvalidated: bool = False
     motion_quality_bundle: MotionQualityShadowBundle | None = None
     motion_quality_error: str | None = None
+    experimental_fast_window_seconds: float | None = None
+    experimental_fast_bundle: BPModelBundle | None = None
+    motion_intensity_config: dict | None = None
+    motion_intensity_error: str | None = None
+
+
+@dataclass
+class LiveMotionIntensityState:
+    """Causal live equivalent of the configured eight-second IMU intensity feature."""
+
+    config: dict
+    previous_row: tuple[int, int, int, int, int] | None = None
+    gravity_g: np.ndarray | None = None
+    dynamic_squared: deque[float] = field(default_factory=deque)
+    activity_history: deque[tuple[int, float]] = field(default_factory=deque)
+    last_update_at: float | None = None
+    mean_activity_g: float | None = None
+    band: str = "unknown"
+
+    def reset(self) -> None:
+        self.previous_row = None
+        self.gravity_g = None
+        self.dynamic_squared.clear()
+        self.activity_history.clear()
+        self.mean_activity_g = None
+        self.band = "unknown"
+
+    def add_imu(self, row: tuple[int, int, int, int, int], now: float) -> None:
+        if self.previous_row is not None:
+            sequence_gap = row[0] != self.previous_row[0] + 1
+            timestamp_gap = row[1] - self.previous_row[1]
+            if sequence_gap or timestamp_gap <= 0 or timestamp_gap > 40:
+                self.reset()
+        imu = self.config["imu"]
+        axes = np.asarray(row[2:5], dtype=float) * float(imu["scale_g_per_lsb"])
+        if self.gravity_g is None:
+            self.gravity_g = axes.copy()
+        else:
+            alpha = float(imu["gravity_alpha"])
+            self.gravity_g = self.gravity_g + alpha * (axes - self.gravity_g)
+        dynamic_squared = float(np.sum(np.square(axes - self.gravity_g)))
+        self.dynamic_squared.append(dynamic_squared)
+        window_samples = int(imu["activity_window_samples"])
+        while len(self.dynamic_squared) > window_samples:
+            self.dynamic_squared.popleft()
+        activity_g = math.sqrt(float(np.mean(self.dynamic_squared)))
+        self.activity_history.append((int(row[1]), activity_g))
+        intensity_window_ms = float(self.config["window_seconds"]) * 1000.0
+        cutoff = int(row[1] - intensity_window_ms)
+        while self.activity_history and self.activity_history[0][0] < cutoff:
+            self.activity_history.popleft()
+        self.previous_row = row
+        self.last_update_at = now
+        if (
+            len(self.activity_history) >= 2
+            and self.activity_history[-1][0] - self.activity_history[0][0]
+            >= intensity_window_ms - 20.0
+        ):
+            self.mean_activity_g = float(
+                np.mean([value for _, value in self.activity_history])
+            )
+            self.band = classify_motion_intensity(self.mean_activity_g, self.config)
+        else:
+            self.mean_activity_g = None
+            self.band = "unknown"
 
 
 @dataclass
@@ -123,6 +198,7 @@ class BPViewerState:
     motion_updates: deque[dict] = field(default_factory=deque)
     warnings: deque[str] = field(default_factory=lambda: deque(maxlen=MAX_RECENT_WARNINGS))
     motion_quality_shadow: MotionQualityShadowState | None = None
+    motion_intensity: LiveMotionIntensityState | None = None
 
 
 def positive_float(value: str) -> float:
@@ -143,6 +219,16 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--calibration-sbp", type=positive_float)
     parser.add_argument("--calibration-dbp", type=positive_float)
     parser.add_argument("--allow-unvalidated", action="store_true")
+    parser.add_argument(
+        "--experimental-fast-window",
+        type=int,
+        choices=[int(EXPERIMENTAL_FAST_WINDOW_SECONDS)],
+        metavar="SECONDS",
+        help=(
+            "opt in to the unvalidated 30-second startup/recovery policy; "
+            "the normal 85-second policy remains the fallback"
+        ),
+    )
     parser.add_argument("--config", default="config/bp_pipeline_v1.json")
     parser.add_argument(
         "--motion-quality-shadow-model",
@@ -153,6 +239,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default="config/motion_quality_v1.json",
         help="Configuration paired with --motion-quality-shadow-model",
     )
+    parser.add_argument(
+        "--motion-intensity-config",
+        default="config/motion_quality_v2.json",
+        help="Configuration containing the live Stationary/Mild/Moderate/Severe boundaries",
+    )
     parser.add_argument("--baud", type=int, default=DEFAULT_BAUD_RATE)
     parser.add_argument("--refresh", type=positive_float, default=DEFAULT_REFRESH_SECONDS)
     args = parser.parse_args(argv)
@@ -160,6 +251,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         parser.error("pending mode requires --calibration-sbp and --calibration-dbp")
     if args.model_dir is None and args.allow_unvalidated:
         parser.error("--allow-unvalidated requires --model-dir")
+    if args.model_dir is None and args.experimental_fast_window is not None:
+        parser.error("--experimental-fast-window requires --model-dir")
     if args.calibration_sbp is not None and args.calibration_dbp is not None and args.calibration_sbp <= args.calibration_dbp:
         parser.error("calibration SBP must be greater than calibration DBP")
     return args
@@ -167,6 +260,16 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 def load_viewer_context(args: argparse.Namespace) -> ViewerContext:
     config, config_path = load_config(args.config)
+    motion_intensity_config = None
+    motion_intensity_error = None
+    try:
+        motion_intensity_config = load_motion_intensity_config(
+            Path(args.motion_intensity_config)
+        )
+        if motion_intensity_settings(motion_intensity_config) is None:
+            raise ValueError("motion intensity configuration has no bands")
+    except (OSError, ValueError, KeyError) as exc:
+        motion_intensity_error = str(exc)
     motion_quality_bundle = None
     motion_quality_error = None
     if args.motion_quality_shadow_model:
@@ -185,6 +288,8 @@ def load_viewer_context(args: argparse.Namespace) -> ViewerContext:
             config=config,
             motion_quality_bundle=motion_quality_bundle,
             motion_quality_error=motion_quality_error,
+            motion_intensity_config=motion_intensity_config,
+            motion_intensity_error=motion_intensity_error,
         )
     try:
         bundle = load_model_bundle(
@@ -206,6 +311,8 @@ def load_viewer_context(args: argparse.Namespace) -> ViewerContext:
             allow_unvalidated=bool(args.allow_unvalidated),
             motion_quality_bundle=motion_quality_bundle,
             motion_quality_error=motion_quality_error,
+            motion_intensity_config=motion_intensity_config,
+            motion_intensity_error=motion_intensity_error,
         )
     return ViewerContext(
         participant_id=bundle.participant_id,
@@ -216,6 +323,18 @@ def load_viewer_context(args: argparse.Namespace) -> ViewerContext:
         allow_unvalidated=bool(args.allow_unvalidated),
         motion_quality_bundle=motion_quality_bundle,
         motion_quality_error=motion_quality_error,
+        experimental_fast_window_seconds=(
+            float(args.experimental_fast_window)
+            if args.experimental_fast_window is not None
+            else None
+        ),
+        experimental_fast_bundle=(
+            make_short_window_bundle(bundle, float(args.experimental_fast_window))
+            if args.experimental_fast_window is not None
+            else None
+        ),
+        motion_intensity_config=motion_intensity_config,
+        motion_intensity_error=motion_intensity_error,
     )
 
 
@@ -278,6 +397,8 @@ def update_state_from_line(state: BPViewerState, line: str, now: float) -> bool:
     if imu is not None:
         if state.motion_quality_shadow is not None:
             state.motion_quality_shadow.add_imu(imu)
+        if state.motion_intensity is not None:
+            state.motion_intensity.add_imu(imu, now)
         return True
     parsed = parse_firmware_status_line(line)
     if parsed is None:
@@ -357,6 +478,28 @@ def build_analysis_inputs(state: BPViewerState) -> tuple[pd.DataFrame, dict]:
     return frame, metadata
 
 
+def trailing_analysis_inputs(
+    frame: pd.DataFrame,
+    metadata: dict,
+    duration_seconds: float,
+) -> tuple[pd.DataFrame, dict]:
+    """Keep exactly the causal trailing slice and matching motion messages."""
+    if frame.empty:
+        return frame.copy(), dict(metadata)
+    end_ms = float(frame["timestamp_ms"].iloc[-1])
+    start_ms = end_ms - float(duration_seconds) * 1000.0
+    selected = frame.loc[frame["timestamp_ms"] >= start_ms].copy()
+    result_metadata = dict(metadata)
+    updates = sorted(
+        metadata.get("firmware_motion_updates", []),
+        key=lambda update: float(update.get("timestamp_ms", 0.0)),
+    )
+    before = [update for update in updates if float(update.get("timestamp_ms", 0.0)) < start_ms]
+    within = [update for update in updates if float(update.get("timestamp_ms", 0.0)) >= start_ms]
+    result_metadata["firmware_motion_updates"] = before[-1:] + within
+    return selected, result_metadata
+
+
 def maybe_predict(
     state: BPViewerState,
     context: ViewerContext,
@@ -374,9 +517,11 @@ def maybe_predict(
         state.result = BPInferenceResult("model_pending", "viewer is ready; no saved prediction model is connected")
         return False
     duration = buffer_duration_s(state)
-    if duration < MINIMUM_ANALYSIS_SECONDS:
+    fast_seconds = context.experimental_fast_window_seconds
+    minimum_seconds = fast_seconds if fast_seconds is not None else MINIMUM_ANALYSIS_SECONDS
+    if duration < minimum_seconds:
         state.result = BPInferenceResult(
-            "warming_up", f"collecting stationary PPG: {duration:.1f}/{MINIMUM_ANALYSIS_SECONDS:.0f} s"
+            "warming_up", f"collecting stationary PPG: {duration:.1f}/{minimum_seconds:.0f} s"
         )
         return False
     if state.last_analysis_at is not None and now - state.last_analysis_at < ANALYSIS_PERIOD_SECONDS:
@@ -384,8 +529,25 @@ def maybe_predict(
     state.last_analysis_at = now
     state.last_analysis_sensor_ms = state.ppg_samples[-1][1]
     frame, metadata = build_analysis_inputs(state)
+    using_fast_policy = (
+        fast_seconds is not None
+        and context.experimental_fast_bundle is not None
+        and duration < MINIMUM_ANALYSIS_SECONDS
+    )
+    analysis_bundle = context.experimental_fast_bundle if using_fast_policy else context.bundle
+    if using_fast_policy:
+        frame, metadata = trailing_analysis_inputs(frame, metadata, fast_seconds)
     try:
-        state.result = predictor(context.bundle, frame, metadata)
+        state.result = predictor(analysis_bundle, frame, metadata)
+        if using_fast_policy and state.result.numeric_available:
+            state.result = replace(
+                state.result,
+                status="experimental_fast_estimate",
+                reason=(
+                    f"unvalidated {fast_seconds:.0f}-second startup/recovery policy; "
+                    f"{state.result.reason}"
+                ),
+            )
     except Exception as exc:
         state.result = BPInferenceResult("analysis_error", str(exc))
     return True
@@ -420,6 +582,20 @@ def _health_line(label: str, stats: dict, overflow_key: str) -> str:
     return f"{label:<4} {rate_text:<10} | I2C errors: {stats.get('i2c_errors', '--'):<4} | FIFO overflows: {stats.get(overflow_key, '--')}"
 
 
+def live_motion_intensity(
+    state: BPViewerState,
+    now: float,
+) -> tuple[str, float | None]:
+    tracker = state.motion_intensity
+    if (
+        tracker is None
+        or tracker.last_update_at is None
+        or now - tracker.last_update_at > MOTION_STALE_SECONDS
+    ):
+        return "unknown", None
+    return tracker.band, tracker.mean_activity_g
+
+
 def render_screen(state: BPViewerState, context: ViewerContext, now: float, port: str, baud: int, saving: bool = False) -> str:
     result = effective_result(state, now)
     numeric = result.numeric_available
@@ -428,6 +604,9 @@ def render_screen(state: BPViewerState, context: ViewerContext, now: float, port
     delta = f"{result.delta_sbp:+.1f}/{result.delta_dbp:+.1f}" if numeric else "--/--"
     status = STATUS_LABELS.get(result.status, result.status.replace("_", " ").title())
     motion = str(state.latest_motion.get("status", "waiting")).replace("_", " ").title()
+    intensity_band, intensity_g = live_motion_intensity(state, now)
+    intensity = intensity_band.replace("_", " ").title()
+    intensity_value = f"{intensity_g:.3f} g" if intensity_g is not None else "warming / unavailable"
     eligibility = "Passed preliminary personal test" if context.bundle and context.bundle.viewer_eligible else "Pending / not passed"
     lines = [
         "EXPERIMENTAL UPPER-ARM PPG-TO-BP VIEWER",
@@ -445,12 +624,26 @@ def render_screen(state: BPViewerState, context: ViewerContext, now: float, port
             else "      Calibration BP: --/-- mmHg"
         ),
         f"   Model eligibility: {eligibility}",
-        f"         Still buffer: {buffer_duration_s(state):.1f}/{MINIMUM_ANALYSIS_SECONDS:.0f} s minimum",
+        (
+            f"         Still buffer: {buffer_duration_s(state):.1f}/"
+            f"{context.experimental_fast_window_seconds:.0f} s fast attempt"
+            if context.experimental_fast_window_seconds is not None
+            else f"         Still buffer: {buffer_duration_s(state):.1f}/{MINIMUM_ANALYSIS_SECONDS:.0f} s minimum"
+        ),
+        *(
+            [f"    Standard fallback: {MINIMUM_ANALYSIS_SECONDS:.0f} s"]
+            if context.experimental_fast_window_seconds is not None
+            else []
+        ),
         f"      Accepted windows: {result.accepted_windows}/{result.total_windows}",
         f" Unique clean coverage: {result.clean_coverage_s:.1f} s",
         f"       PPG pulse rate: {result.pulse_rate_bpm:.1f} BPM" if result.pulse_rate_bpm is not None else "       PPG pulse rate: -- BPM",
         f"              Motion: {motion}",
+        f"    Motion intensity: {intensity} ({intensity_value})",
+        "  Intensity control: Display only; Still/Moving remains the BP gate",
     ]
+    if context.motion_intensity_error:
+        lines.append(f"  Intensity warning: {context.motion_intensity_error}")
     if state.motion_quality_shadow is not None:
         shadow = state.motion_quality_shadow.result
         probability = (
@@ -488,8 +681,16 @@ def render_screen(state: BPViewerState, context: ViewerContext, now: float, port
         "RECENT WARNINGS",
     ])
     lines.extend(f"- {warning}" for warning in state.warnings) if state.warnings else lines.append("- none")
-    if result.status == "unvalidated_estimate":
+    if result.status in {"unvalidated_estimate", "experimental_fast_estimate"}:
         lines.extend(["", "WARNING: UNVALIDATED DEVELOPMENT ESTIMATE"])
+    if context.experimental_fast_window_seconds is not None:
+        lines.extend(
+            [
+                "",
+                "FAST MODE: 30-second policy is opt-in development evidence only.",
+                "If it fails quality checks, the viewer continues toward the 85-second fallback.",
+            ]
+        )
     lines.extend(
         [
             "",
@@ -548,6 +749,8 @@ def import_serial():
 
 def run_viewer(args: argparse.Namespace, context: ViewerContext, serial_module, clock=time.monotonic, sleep=time.sleep) -> int:
     state = BPViewerState(started_at=clock())
+    if context.motion_intensity_config is not None:
+        state.motion_intensity = LiveMotionIntensityState(context.motion_intensity_config)
     if context.motion_quality_bundle is not None:
         state.motion_quality_shadow = MotionQualityShadowState(context.motion_quality_bundle)
     try:

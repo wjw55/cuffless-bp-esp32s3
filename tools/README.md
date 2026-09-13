@@ -16,7 +16,7 @@ The scripts kept directly in `tools/` are stable command-line entry points. Shar
 | --- | --- |
 | `view_live_hr.py` | Firmware live-HR terminal display, primarily for the finger profile. |
 | `view_live_upper_arm_hr.py` | PC rolling upper-arm HR preview. |
-| `view_live_bp.py` | Experimental PC rolling BP preview with safe model gating. |
+| `view_live_bp.py` | Experimental PC rolling BP preview with safe model gating and an opt-in 30-second development policy. |
 
 ## Motion and signal quality
 

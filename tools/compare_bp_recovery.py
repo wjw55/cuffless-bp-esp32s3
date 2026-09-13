@@ -6,8 +6,6 @@ All replay rows are development diagnostics, not independent BP observations.
 from __future__ import annotations
 
 import argparse
-import copy
-from dataclasses import replace
 import hashlib
 import json
 from pathlib import Path
@@ -18,7 +16,8 @@ import pandas as pd
 from bp_core.datasets import _discover_local
 from bp_core.features import _contact_masks, estimate_sample_rate, recording_quality_reasons
 from bp_core.inference import (
-    _recording_context, load_model_bundle, predict_frame, signal_from_ppg_frame,
+    _recording_context, load_model_bundle, make_short_window_bundle, predict_frame,
+    signal_from_ppg_frame,
 )
 from upper_arm_hr import analyze_upper_arm_ppg
 
@@ -52,13 +51,7 @@ def recording_runs(metadata, first, last):
 
 
 def short_bundle(bundle, duration):
-    config = copy.deepcopy(bundle.config)
-    config['quality'].update(minimum_accepted_windows_per_occasion=3,
-                             minimum_unique_clean_coverage_seconds=0.8 * duration,
-                             require_upper_arm_analyzer_acceptance=False)
-    # This override is confined to an in-memory experimental copy. The estimator,
-    # feature schema, preprocessing and calibration are the original objects.
-    return replace(bundle, config=config, viewer_eligible=False, allow_unvalidated=True)
+    return make_short_window_bundle(bundle, duration, research_override=True)
 
 
 def trailing_frame(frame, end_ms, duration, fresh_ms):

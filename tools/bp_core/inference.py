@@ -1,9 +1,10 @@
 from __future__ import annotations
 
+import copy
 import hashlib
 import json
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
@@ -16,6 +17,8 @@ from .features import aggregate_recording_features, process_signal
 
 
 MODEL_MANIFEST_SCHEMA_VERSION = 1
+SHORT_WINDOW_MINIMUM_ACCEPTED_WINDOWS = 3
+SHORT_WINDOW_CLEAN_COVERAGE_FRACTION = 0.8
 
 
 class ModelCompatibilityError(ValueError):
@@ -54,6 +57,39 @@ class BPInferenceResult:
     @property
     def numeric_available(self) -> bool:
         return self.sbp is not None and self.dbp is not None
+
+
+def make_short_window_bundle(
+    bundle: BPModelBundle,
+    duration_seconds: float,
+    *,
+    research_override: bool = False,
+) -> BPModelBundle:
+    """Return an in-memory bundle using the frozen short-window quality policy.
+
+    The estimator, calibration, feature schema, and saved model package are not
+    changed.  Only the occasion-level duration-dependent quality requirements
+    are adjusted.  Normal callers retain the saved model eligibility gate;
+    offline development comparisons may explicitly request a research override.
+    """
+    duration = float(duration_seconds)
+    minimum_duration = float(bundle.config.get("signal", {}).get("window_seconds", 8.0))
+    if not math.isfinite(duration) or duration < minimum_duration:
+        raise ValueError(
+            f"short-window duration must be finite and at least {minimum_duration:g} seconds"
+        )
+    config = copy.deepcopy(bundle.config)
+    config.setdefault("quality", {}).update(
+        minimum_accepted_windows_per_occasion=SHORT_WINDOW_MINIMUM_ACCEPTED_WINDOWS,
+        minimum_unique_clean_coverage_seconds=(
+            SHORT_WINDOW_CLEAN_COVERAGE_FRACTION * duration
+        ),
+        require_upper_arm_analyzer_acceptance=False,
+    )
+    replacements: dict[str, Any] = {"config": config}
+    if research_override:
+        replacements.update(viewer_eligible=False, allow_unvalidated=True)
+    return replace(bundle, **replacements)
 
 
 def _sha256(path: Path) -> str:

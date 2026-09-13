@@ -110,6 +110,24 @@ After creating a model package with `single-subject`, connect it without rebuild
 
 The viewer requires approximately 85 seconds of continuous stationary upper-arm PPG within a 90-second rolling buffer. The shared occasion gate additionally requires 60 unique seconds from accepted windows. Movement, timestamp restarts, sequence gaps, I2C errors, or FIFO overflows clear the usable buffer and hide the previous result. A failing model remains hidden unless `--allow-unvalidated` is supplied; that override displays a prominent `UNVALIDATED DEVELOPMENT ESTIMATE` warning.
 
+An opt-in development mode can attempt startup and post-motion recovery from a causal trailing 30-second slice:
+
+```powershell
+& "C:\wjw\Anaconda\python.exe" tools\view_live_bp.py `
+  --port COM5 `
+  --participant-id P001 `
+  --model-dir data\processed\bp\<run_id>\single_subject\P001 `
+  --experimental-fast-window 30
+```
+
+This mode requires at least three accepted eight-second windows and 24 seconds of unique clean coverage. It preserves all per-window timing, motion, contact, clipping and morphology checks, and never reuses samples from before the latest buffer reset. A passing short slice is labelled `EXPERIMENTAL FAST ESTIMATE`. If the short slice fails, BP remains hidden while the viewer retries with new causal data and continues toward the unchanged 85-second standard policy. At 85 seconds, the normal model configuration and 60-second clean-coverage gate take over.
+
+The fast policy is development evidence only. In the completed P001 two-session replay it retained 42 of 59 standard-policy updates (71.2%), below the preselected 80% target, although all four controlled recovery recordings obtained a short-window estimate about 30–34 seconds after the final `Still` state. It must remain opt-in and must not be described as validated BP.
+
+The viewer also displays the shared Stage 1 IMU intensity context from `config/motion_quality_v2.json`. After an eight-second causal warm-up, it reports `Stationary`, `Mild`, `Moderate` or `Severe`; missing, warming or stale IMU data reports `Unknown`. The calculation uses the same causal gravity estimate, one-second rolling RMS activity and configured 0.02/0.08/0.20 g boundaries as offline development. These are four motion bands plus one `Unknown` display state—not five trained activity classes.
+
+Motion intensity is currently display-only. The firmware's validated binary `Still`/`Moving` status remains the BP gate: `Moving` immediately hides BP and clears the clean buffer regardless of the displayed intensity. The bands must not permit live BP during mild or moderate movement until the separate motion-aware BP path has suitable synchronized reference data and passes validation. Use `--motion-intensity-config` only to point at another reviewed configuration; the default is `config/motion_quality_v2.json`.
+
 An optional frozen motion-quality classifier can be displayed alongside BP in observation-only mode:
 
 ```powershell
