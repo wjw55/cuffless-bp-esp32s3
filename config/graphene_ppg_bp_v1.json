@@ -1,0 +1,51 @@
+{
+  "schema_version": 1,
+  "experiment_id": "graphene_ppg_bp_short_window_v1",
+  "research_only": true,
+  "deployment_eligible": false,
+  "dataset": {
+    "root": "data/external/graphene_bp",
+    "source_url": "https://physionet.org/content/bp-graphene-bioimpedance/1.0.0/",
+    "version": "1.0.0",
+    "license": "ODC Attribution License v1.0"
+  },
+  "observation": {
+    "durations_seconds": [20, 30, 60, 85],
+    "update_step_seconds": 5,
+    "maximum_duration_shortfall_seconds": 1.0,
+    "minimum_clean_fraction": 0.75,
+    "minimum_accepted_segments": 2
+  },
+  "signal": {
+    "window_seconds": 8.0,
+    "window_step_seconds": 4.0,
+    "bandpass_low_hz": 0.5,
+    "bandpass_high_hz": 8.0,
+    "filter_order": 4,
+    "template_samples": 128,
+    "minimum_hr_bpm": 40.0,
+    "maximum_hr_bpm": 180.0,
+    "analysis_sample_rate_hz": 125.0
+  },
+  "quality": {
+    "minimum_beats_per_window": 4,
+    "maximum_interval_cv": 0.20,
+    "minimum_template_correlation": 0.60
+  },
+  "reference": {
+    "minimum_sbp_mmHg": 70.0,
+    "maximum_sbp_mmHg": 240.0,
+    "minimum_dbp_mmHg": 35.0,
+    "maximum_dbp_mmHg": 150.0,
+    "minimum_pulse_pressure_mmHg": 10.0,
+    "minimum_beats": 5,
+    "peak_prominence_mmHg": 8.0,
+    "maximum_interval_cv": 0.25,
+    "label_window_seconds": 10.0
+  },
+  "model": {
+    "ridge_alpha": 10.0,
+    "minimum_participants": 3,
+    "minimum_training_examples": 10
+  }
+}
