@@ -9,13 +9,14 @@ import numpy as np
 import pandas as pd
 
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from motion_quality_classifier import (  # noqa: E402
     evaluate_frozen_model,
     evaluate_candidates,
     file_sha256,
     grouped_trial_splits,
+    intensity_band_metrics,
     load_training_data,
     train_and_evaluate,
 )
@@ -53,6 +54,8 @@ def synthetic_frame():
                     "participant_id": "P001",
                     "session_id": "motion_quality_v1",
                     "trial_id": f"trial_{trial_number}",
+                    "start_s": float(index * 4),
+                    "end_s": float(index * 4 + 8),
                     "activity_label": "deliberately_correlated_context" if usable == 0 else "still",
                     "reviewed_label": "clean" if usable else "motion_corrupted",
                     "reviewer": "tester",
@@ -61,6 +64,7 @@ def synthetic_frame():
                     "supervised_training_eligible": True,
                     "ppg_ac_rms": 1.0 + (1 - usable) * 5.0 + trial_number * 0.1,
                     "imu_dynamic_rms_g": 0.01 + (1 - usable) * 0.2 + index * 0.0001,
+                    "imu_activity_mean_g": 0.01 + (1 - usable) * 0.2 + index * 0.0001,
                     "imu_activity_above_threshold_fraction": float(1 - usable),
                 }
             )
@@ -70,6 +74,8 @@ def synthetic_frame():
             "participant_id": "P001",
             "session_id": "motion_quality_v1",
             "trial_id": "trial_0",
+            "start_s": 100.0,
+            "end_s": 108.0,
             "activity_label": "still",
             "reviewed_label": "uncertain",
             "reviewer": "tester",
@@ -78,6 +84,7 @@ def synthetic_frame():
             "supervised_training_eligible": False,
             "ppg_ac_rms": 100.0,
             "imu_dynamic_rms_g": 10.0,
+            "imu_activity_mean_g": 10.0,
             "imu_activity_above_threshold_fraction": 1.0,
         }
     )
@@ -147,6 +154,46 @@ class LeakageAndEvaluationTests(unittest.TestCase):
         pd.testing.assert_frame_equal(first[0], second[0])
         self.assertEqual(first[1:], second[1:])
         self.assertTrue(first[3])
+
+    def test_per_band_metrics_keep_missing_classes_explicit(self):
+        frame = synthetic_frame().iloc[:-1].copy()
+        frame["motion_intensity_band"] = np.where(frame["usable"] == 1, "stationary", "mild")
+        predictions, summaries, _, _ = evaluate_candidates(
+            frame,
+            ["ppg_ac_rms", "imu_dynamic_rms_g", "imu_activity_above_threshold_fraction"],
+            classifier_settings(),
+        )
+        rows = intensity_band_metrics(
+            predictions,
+            [str(item["model"]) for item in summaries],
+            ["stationary", "mild", "moderate", "severe"],
+        )
+        logistic = {row["motion_intensity_band"]: row for row in rows if row["model"] == "logistic_l2"}
+        self.assertEqual(logistic["moderate"]["window_count"], 0)
+        self.assertIsNone(logistic["stationary"]["balanced_accuracy"])
+        self.assertIsNone(logistic["mild"]["balanced_accuracy"])
+        self.assertEqual(logistic["stationary"]["usable_recall"], 1.0)
+        self.assertEqual(logistic["mild"]["unusable_recall"], 1.0)
+
+    def test_per_band_time_coverage_does_not_double_count_overlapping_windows(self):
+        predictions = pd.DataFrame(
+            {
+                "model": ["model", "model"],
+                "participant_id": ["P001", "P001"],
+                "session_id": ["s", "s"],
+                "trial_id": ["t", "t"],
+                "start_s": [0.0, 4.0],
+                "end_s": [8.0, 12.0],
+                "motion_intensity_band": ["mild", "mild"],
+                "true_unusable": [0, 1],
+                "predicted_unusable": [0, 1],
+                "unusable_probability": [0.1, 0.9],
+            }
+        )
+        metrics = intensity_band_metrics(predictions, ["model"], ["mild"])[0]
+        self.assertEqual(metrics["supported_unique_seconds"], 12.0)
+        self.assertEqual(metrics["true_usable_unique_seconds"], 8.0)
+        self.assertAlmostEqual(metrics["true_usable_time_coverage"], 2.0 / 3.0)
 
 
 class OutputPackageTests(unittest.TestCase):

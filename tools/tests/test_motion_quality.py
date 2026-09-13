@@ -8,7 +8,7 @@ import numpy as np
 import pandas as pd
 
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from motion_quality import (  # noqa: E402
     MotionTrial,
@@ -17,6 +17,8 @@ from motion_quality import (  # noqa: E402
     _health_reasons,
     _protocol_context,
     _window_features,
+    attach_motion_intensity,
+    classify_motion_intensity,
     file_sha256,
     finalize_dataset,
     load_config,
@@ -25,7 +27,8 @@ from motion_quality import (  # noqa: E402
 from motion_study_protocol import MOTION_QUALITY_V1  # noqa: E402
 
 
-CONFIG_PATH = Path(__file__).resolve().parents[1] / "config" / "motion_quality_v1.json"
+CONFIG_PATH = Path(__file__).resolve().parents[2] / "config" / "motion_quality_v1.json"
+CONFIG_V2_PATH = Path(__file__).resolve().parents[2] / "config" / "motion_quality_v2.json"
 
 
 def annotation_frame(participant="P001", session="motion_quality_v1", trial="motion_quality_001"):
@@ -127,6 +130,38 @@ class FeatureAndSynchronizationTests(unittest.TestCase):
         self.assertLess(float(np.median(still_activity[-800:])), 0.005)
         self.assertGreater(float(np.median(moving_activity[-800:])), 0.05)
 
+    def test_motion_intensity_bands_use_configured_rms_boundaries(self):
+        config = load_config(CONFIG_V2_PATH)
+        expected = {
+            0.0: "stationary",
+            0.0199: "stationary",
+            0.02: "mild",
+            0.0799: "mild",
+            0.08: "moderate",
+            0.1999: "moderate",
+            0.2: "severe",
+        }
+        for value, band in expected.items():
+            with self.subTest(value=value):
+                self.assertEqual(classify_motion_intensity(value, config), band)
+        self.assertEqual(classify_motion_intensity(np.nan, config), "unknown")
+
+    def test_existing_review_rows_can_be_banded_without_changing_labels(self):
+        config = load_config(CONFIG_V2_PATH)
+        frame = pd.DataFrame(
+            {
+                "window_id": ["a", "b", "c", "d"],
+                "reviewed_label": ["clean", "clean", "motion_corrupted", "uncertain"],
+                "imu_activity_mean_g": [0.01, 0.04, 0.1, 0.3],
+            }
+        )
+        result = attach_motion_intensity(frame, config)
+        self.assertEqual(
+            result["motion_intensity_band"].tolist(),
+            ["stationary", "mild", "moderate", "severe"],
+        )
+        self.assertEqual(result["reviewed_label"].tolist(), frame["reviewed_label"].tolist())
+
     def test_contact_step_and_clipping_features_are_exposed(self):
         time = np.arange(800) * 0.01
         ir = 60_000.0 + 1000.0 * np.sin(2 * np.pi * 1.2 * time)
@@ -180,6 +215,15 @@ class FeatureAndSynchronizationTests(unittest.TestCase):
         self.assertAlmostEqual(report["ppg_rate_hz"], 100.0)
         self.assertAlmostEqual(report["imu_rate_hz"], 125.0)
         self.assertTrue((rows.loc[rows["reviewable"], "window_rejection_reasons"] == "").all())
+
+    def test_v2_preparation_populates_motion_intensity_context(self):
+        config = load_config(CONFIG_V2_PATH)
+        with TemporaryDirectory() as directory:
+            rows, _, _ = prepare_trial(write_trial(Path(directory)), config)
+        self.assertIn("motion_intensity_band", rows.columns)
+        observed = set(rows["motion_intensity_band"].dropna().astype(str))
+        self.assertTrue(observed)
+        self.assertTrue(observed <= {"stationary", "mild", "moderate", "severe"})
 
     def test_sequence_and_sensor_health_faults_reject_recording(self):
         with TemporaryDirectory() as directory:

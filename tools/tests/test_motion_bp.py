@@ -1,16 +1,22 @@
 import copy
 import json
 from pathlib import Path
+import sys
 import tempfile
 import unittest
 
 import numpy as np
 import pandas as pd
 
-from motion_bp import (ROOT, audit, assert_split, coverage, evaluate_ablation,
-                       extract_recording, feature_sets, interval_union, load_config,
-                       metrics, movement_duration, quality_decision, stream_reasons,
-                       timing_reasons, validate_reference, PPG_COLUMNS, chronological_split, prediction_report)
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from motion_bp import (ROOT, ablation_comparison, accepted_unique_seconds, audit,
+                       assert_split, attach_motion_band_features, coverage,
+                       evaluate_ablation, extract_recording, feature_sets,
+                       interval_union, load_config, metrics, movement_duration,
+                       quality_decision, stream_reasons, timing_reasons,
+                       validate_reference, PPG_COLUMNS, chronological_split,
+                       prediction_report)
 from test_motion_quality import write_trial
 
 
@@ -26,7 +32,8 @@ def examples(participant, start, count=10):
             reference_source_sha256='a'*64, reference_start_ms=0., reference_end_ms=20000.,
             start_timestamp_ms=0., end_timestamp_ms=8000., true_sbp=120., true_dbp=80.,
             baseline_sbp=120., baseline_dbp=80., morph__rise_time_s=.2,
-            calibration__rise_time_s=.2, imu_dynamic_rms_g=.04, imu_movement_duration_s=4.,
+            calibration__rise_time_s=.2, imu_activity_mean_g=.04,
+            imu_dynamic_rms_g=.04, imu_movement_duration_s=4.,
             severity='mild', signal_eligible=True))
     return pd.DataFrame(rows)
 
@@ -81,18 +88,19 @@ class MotionBPTests(unittest.TestCase):
             self.assertFalse(result.iloc[0].identity_resolved)
 
     def test_quality_states_and_no_numeric_permission(self):
-        features = dict(imu_dynamic_rms_g=.04, ppg_dc_median=80000., ppg_clipping_fraction=0.,
+        features = dict(imu_activity_mean_g=.04, imu_dynamic_rms_g=.04,
+            ppg_dc_median=80000., ppg_clipping_fraction=0.,
             ppg_template_correlation=.9, ppg_ibi_cv=.1, ppg_valid_beat_count=8, ppg_morphology_accepted=True)
         result = quality_decision(features, [], self.config)
         self.assertTrue(result['signal_eligible'])
         self.assertEqual(result['status'], 'Low confidence')
         features['true_sbp'] = 300
         self.assertEqual(result, quality_decision(features, [], self.config))
-        features['imu_dynamic_rms_g'] = .3
+        features['imu_activity_mean_g'] = .3
         self.assertEqual(quality_decision(features, [], self.config)['status'], 'Motion too severe')
         features['ppg_dc_median'] = 1000
         self.assertEqual(quality_decision(features, [], self.config)['status'], 'Poor contact')
-        features['imu_dynamic_rms_g'], features['ppg_dc_median'] = .04, 80000
+        features['imu_activity_mean_g'], features['ppg_dc_median'] = .04, 80000
         features['ppg_template_correlation'] = None
         self.assertFalse(quality_decision(features, [], self.config)['signal_eligible'])
 
@@ -139,12 +147,27 @@ class MotionBPTests(unittest.TestCase):
         with self.assertRaises(ValueError): evaluate_ablation(train, uncertainty, modified, self.config)
 
     def test_feature_selection_excludes_labels_and_identity(self):
-        frame = examples('P1', 1)
+        frame = attach_motion_band_features(examples('P1', 1), self.config)
         frame['imu_sbp_label'] = 123
         frame['activity_label'] = 1
-        for columns in feature_sets(frame).values():
+        sets = feature_sets(frame)
+        for columns in sets.values():
             self.assertNotIn('imu_sbp_label', columns)
             self.assertNotIn('activity_label', columns)
+        self.assertFalse(any(column.startswith('imu_') for column in sets['ppg_only']))
+        self.assertIn('imu_activity_mean_g', sets['ppg_intensity'])
+        self.assertIn('imu_band_mild', sets['ppg_intensity'])
+        self.assertIn('imu_dynamic_rms_g', sets['ppg_full_imu'])
+
+    def test_motion_bands_use_shared_stage1_source_and_boundaries(self):
+        frame = examples('P1', 1, 4)
+        frame['imu_activity_mean_g'] = [.01, .02, .08, .20]
+        frame['imu_dynamic_rms_g'] = [.5, .5, .5, .001]
+        result = attach_motion_band_features(frame, self.config)
+        self.assertEqual(result.severity.tolist(), ['stationary', 'mild', 'moderate', 'severe'])
+        self.assertEqual(result.imu_band_mild.tolist(), [0., 1., 0., 0.])
+        self.assertEqual(result.imu_band_moderate.tolist(), [0., 0., 1., 0.])
+        self.assertEqual(result.imu_band_severe.tolist(), [0., 0., 0., 1.])
 
     def test_chronological_split_keeps_overlapping_windows_together(self):
         frame = examples('P1', 1, 30)
@@ -177,10 +200,47 @@ class MotionBPTests(unittest.TestCase):
 
     def test_unseen_motion_severity_cannot_get_narrow_interval(self):
         train, uncertainty, test = examples('P1', 1), examples('P1', 20), examples('P1', 40)
-        test['severity'] = 'moderate'
+        test['imu_activity_mean_g'] = .1
         result, report = evaluate_ablation(train, uncertainty, test, self.config)
         self.assertFalse(result.accepted.any())
         self.assertIsNone(report['models']['ppg_full_imu']['moderate']['sbp']['mae'])
+
+    def test_ablation_comparison_uses_common_windows_and_unique_coverage(self):
+        base = examples('P1', 1, 3)
+        base['recording_id'] = 'P1_shared_recording'
+        base['start_timestamp_ms'] = [0., 4000., 12000.]
+        base['end_timestamp_ms'] = [8000., 12000., 20000.]
+        base['model'] = 'ppg_only'
+        base['accepted'] = [True, True, False]
+        base['predicted_sbp'] = [124., 124., 124.]
+        base['predicted_dbp'] = [84., 84., 84.]
+        intensity = base.copy()
+        intensity['model'] = 'ppg_intensity'
+        intensity['accepted'] = [True, True, True]
+        intensity['predicted_sbp'] = [122., 122., 122.]
+        intensity['predicted_dbp'] = [82., 82., 82.]
+        full = intensity.copy()
+        full['model'] = 'ppg_full_imu'
+        report = ablation_comparison([base, intensity, full])['ppg_intensity_vs_ppg_only']['mild']
+        self.assertEqual(report['common_accepted_window_count'], 2)
+        self.assertEqual(report['common_accepted_unique_seconds'], 12.)
+        self.assertAlmostEqual(report['ppg_only_accepted_coverage'], .6)
+        self.assertEqual(report['candidate_accepted_coverage'], 1.)
+        self.assertEqual(report['targets']['sbp']['mae_delta_candidate_minus_ppg_only'], -2.)
+        self.assertTrue(report['improves_both_targets_on_common_windows'])
+        self.assertEqual(accepted_unique_seconds(base, [False, False, False]), 0.)
+
+    def test_ablation_comparison_reports_unavailable_without_common_windows(self):
+        outputs = []
+        for name, accepted in [('ppg_only', False), ('ppg_intensity', True), ('ppg_full_imu', True)]:
+            frame = examples('P1', 1, 1)
+            frame['model'], frame['accepted'] = name, accepted
+            frame['predicted_sbp'], frame['predicted_dbp'] = 120., 80.
+            outputs.append(frame)
+        result = ablation_comparison(outputs)['ppg_intensity_vs_ppg_only']['all']
+        self.assertEqual(result['common_accepted_window_count'], 0)
+        self.assertIsNone(result['targets']['sbp']['mae_delta_candidate_minus_ppg_only'])
+        self.assertFalse(result['improves_both_targets_on_common_windows'])
 
 
 if __name__ == '__main__':

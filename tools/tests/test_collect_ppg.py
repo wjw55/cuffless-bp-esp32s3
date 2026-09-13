@@ -10,7 +10,14 @@ from tempfile import TemporaryDirectory
 
 import pandas as pd
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+import json
+import time
+from contextlib import redirect_stdout
+from unittest.mock import patch
+import collect_ppg
+from collect_ppg import overdue_streams
 
 from collect_ppg import (
     LABEL_COLUMNS,
@@ -1135,6 +1142,40 @@ class TimestampDiagnosticsTests(unittest.TestCase):
         self.assertIn("non_increasing=2", summary["timing_quality_reason"])
         self.assertIn("Timing reject", summary["warnings"][-1])
 
+
+
+
+class RequiredStreamTimeoutTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+
+    def test_watchdog_checks_each_stream_and_is_opt_in(self):
+        self.assertEqual(overdue_streams(100, {'ppg': 0, 'imu': 0}, None), [])
+        self.assertEqual(overdue_streams(10, {'ppg': 0, 'imu': 0}, 10), ['ppg', 'imu'])
+        self.assertEqual(overdue_streams(10, {'ppg': 9, 'imu': 0}, 10), ['imu'])
+        self.assertEqual(overdue_streams(10, {'ppg': 0, 'imu': 9}, 10), ['ppg'])
+        self.assertEqual(overdue_streams(10, {'ppg': 9, 'imu': 9}, 10), [])
+
+    def test_silent_serial_saves_incomplete_attempt(self):
+        class SilentSerial:
+            def __enter__(self): return self
+            def __exit__(self, *args): pass
+            def reset_input_buffer(self): pass
+            def readline(self):
+                time.sleep(.02)
+                return b''
+        args = ['collect_ppg.py', '--port', 'FAKE', '--duration', '1', '--subject', 'TEST',
+                '--session', 'silent', '--trial-id', 'one', '--outdir', self.temp.name,
+                '--required-stream-timeout', '0.05']
+        with patch('sys.argv', args), patch('serial.Serial', return_value=SilentSerial()), \
+                patch.object(collect_ppg, 'SERIAL_STARTUP_DELAY_S', 0), redirect_stdout(StringIO()) as output:
+            self.assertEqual(collect_ppg.main(), 0)
+        metadata = json.loads((Path(self.temp.name) / 'TEST_silent_one_metadata.json').read_text())
+        self.assertTrue(metadata['interrupted'])
+        self.assertEqual(metadata['sample_count'], 0)
+        self.assertEqual(metadata['imu_sample_count'], 0)
+        self.assertIn('Required sensor stream absent: ppg, imu', output.getvalue())
 
 if __name__ == "__main__":
     unittest.main()

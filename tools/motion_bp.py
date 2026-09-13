@@ -17,7 +17,10 @@ from sklearn.impute import SimpleImputer
 from sklearn.preprocessing import StandardScaler
 
 from bp_core.features import MODEL_FEATURES, SENSOR_HEALTH_COUNTERS, extract_window_features
-from motion_quality import _causal_imu, extract_synchronized_window_features
+from motion_quality import (_causal_imu, classify_motion_intensity,
+                            extract_synchronized_window_features,
+                            load_config as load_motion_quality_config,
+                            motion_intensity_settings)
 
 ROOT = Path(__file__).resolve().parents[1]
 PPG_COLUMNS = ["sample_seq", "timestamp_ms", "red", "ir"]
@@ -31,14 +34,17 @@ IMU_FEATURES = ["imu_accel_rms_g", "imu_dynamic_rms_g", "imu_dynamic_max_g", "im
     "imu_spectral_entropy", "imu_orientation_change_deg", "imu_movement_duration_s",
     "imu_longest_motion_bout_s"]
 CROSS_FEATURES = ["cross_modal_max_lag_correlation", "cross_modal_spectral_overlap"]
+MOTION_BAND_FEATURES = ["imu_band_mild", "imu_band_moderate", "imu_band_severe"]
 
 
 def load_config(path: Path) -> dict:
     config = json.loads(path.read_text(encoding="utf-8"))
-    config["signal_config"] = json.loads((path.parent / config["quality_config"]).read_text(encoding="utf-8"))
-    bounds = config["dynamic_rms_boundaries_g"]
-    if len(bounds) != 3 or not 0 < bounds[0] < bounds[1] < bounds[2]:
-        raise ValueError("Severity boundaries must be three increasing positive values")
+    config["signal_config"] = load_motion_quality_config(path.parent / config["quality_config"])
+    intensity = motion_intensity_settings(config["signal_config"])
+    if intensity is None or intensity["labels"] != ["stationary", "mild", "moderate", "severe"]:
+        raise ValueError("Motion BP requires the shared stationary/mild/moderate/severe bands")
+    if not np.isclose(float(config["movement_threshold_g"]), intensity["boundaries_g"][0]):
+        raise ValueError("movement_threshold_g must match the shared mild-motion boundary")
     if config.get("deployment_eligible") is not False:
         raise ValueError("This offline pipeline cannot enable deployment")
     for key in ("maximum_gap_ms", "maximum_timestamp_lag_ms", "ridge_alpha", "minimum_uncertainty_groups"):
@@ -167,10 +173,11 @@ def quality_decision(features: dict | None, reasons: list[str], config: dict) ->
             return value if np.isfinite(value) else np.nan
         except (TypeError, ValueError):
             return np.nan
-    rms = number("imu_dynamic_rms_g")
-    if not np.isfinite(rms):
+    intensity = motion_intensity_settings(config["signal_config"])
+    activity = number(intensity["source_feature"])
+    if not np.isfinite(activity):
         return quality_decision(None, ["missing_motion"], config)
-    severity = ("stationary", "mild", "moderate", "severe")[int(np.searchsorted(config["dynamic_rms_boundaries_g"], rms, side="right"))]
+    severity = classify_motion_intensity(activity, config["signal_config"])
     result = {"severity": severity, "recoverability": "uncertain", "status": STATES[2], "signal_eligible": False}
     if number("ppg_dc_median") < config["minimum_contact_counts"] or number("ppg_clipping_fraction") > config["maximum_clipping_fraction"]:
         return dict(result, recoverability="unrecoverable", status=STATES[4])
@@ -274,11 +281,27 @@ def feature_sets(frame: pd.DataFrame) -> dict[str, list[str]]:
     base += ["baseline_sbp", "baseline_dbp"]
     if not any(x.startswith("morph__") for x in base) or not any(x.startswith("calibration__") for x in base):
         raise ValueError("Current and personal calibration morphology are required")
-    intensity = [x for x in ["imu_dynamic_rms_g", "imu_movement_duration_s"] if x in frame]
-    full = [x for x in IMU_FEATURES + CROSS_FEATURES if x in frame]
-    if not intensity or not full:
+    intensity_names = ["imu_activity_mean_g", "imu_dynamic_rms_g", "imu_movement_duration_s"] + MOTION_BAND_FEATURES
+    intensity = [x for x in intensity_names if x in frame]
+    full = [x for x in IMU_FEATURES + CROSS_FEATURES + MOTION_BAND_FEATURES if x in frame]
+    if len(intensity) != len(intensity_names) or not full:
         raise ValueError("Missing IMU features for ablation")
     return {"ppg_only": base, "ppg_intensity": base + intensity, "ppg_full_imu": base + full}
+
+
+def attach_motion_band_features(frame: pd.DataFrame, config: dict) -> pd.DataFrame:
+    """Derive model inputs from the shared signal-only Stage 1 motion bands."""
+    output = frame.copy()
+    settings = motion_intensity_settings(config["signal_config"])
+    source = settings["source_feature"]
+    if source not in output:
+        raise ValueError("Missing shared motion-intensity source feature: " + source)
+    output["severity"] = output[source].map(
+        lambda value: classify_motion_intensity(value, config["signal_config"])
+    )
+    for band in ("mild", "moderate", "severe"):
+        output["imu_band_" + band] = (output["severity"] == band).astype(float)
+    return output
 
 
 def chronological_split(frame: pd.DataFrame, minimum_groups: int = 10) -> dict[str, pd.DataFrame]:
@@ -333,6 +356,75 @@ def coverage(frame: pd.DataFrame, accepted: np.ndarray) -> float:
     return usable / total if total else 0.0
 
 
+def accepted_unique_seconds(frame: pd.DataFrame, accepted: np.ndarray) -> float:
+    """Count accepted signal time once even when adjacent windows overlap."""
+    total_ms = 0.0
+    for _, group in frame.assign(_accepted=np.asarray(accepted, bool)).groupby("recording_id"):
+        intervals = list(zip(group.start_timestamp_ms, group.end_timestamp_ms))
+        total_ms += interval_union([
+            interval for interval, yes in zip(intervals, group._accepted) if yes
+        ]) if len(group) else 0.0
+    return total_ms / 1000.0
+
+
+def ablation_comparison(outputs: list[pd.DataFrame]) -> dict:
+    """Compare IMU models with PPG-only on identical accepted test windows."""
+    selected = {
+        frame.model.iloc[0]: frame.reset_index(drop=True)
+        for frame in outputs
+        if frame.model.iloc[0] in {"ppg_only", "ppg_intensity", "ppg_full_imu"}
+    }
+    if set(selected) != {"ppg_only", "ppg_intensity", "ppg_full_imu"}:
+        raise ValueError("Missing model output for motion ablation comparison")
+    base = selected["ppg_only"]
+    keys = ["participant_id", "recording_id", "cuff_occasion_id", "start_timestamp_ms", "end_timestamp_ms"]
+    report = {}
+    for candidate_name in ("ppg_intensity", "ppg_full_imu"):
+        candidate = selected[candidate_name]
+        if not base[keys].equals(candidate[keys]):
+            raise ValueError("Model outputs are not aligned to identical test windows")
+        bands = {}
+        for band in ("all", "stationary", "motion", "mild", "moderate", "severe"):
+            if band == "all":
+                band_mask = np.ones(len(base), dtype=bool)
+            elif band == "motion":
+                band_mask = base.severity.isin(["mild", "moderate", "severe"]).to_numpy()
+            else:
+                band_mask = (base.severity == band).to_numpy()
+            common = band_mask & base.accepted.to_numpy(bool) & candidate.accepted.to_numpy(bool)
+            base_band = base.loc[band_mask]
+            candidate_band = candidate.loc[band_mask]
+            common_base = base.loc[common]
+            common_candidate = candidate.loc[common]
+            targets = {}
+            improvements = []
+            for target in ("sbp", "dbp"):
+                base_metrics = metrics(common_base["true_" + target], common_base["predicted_" + target])
+                candidate_metrics = metrics(common_candidate["true_" + target], common_candidate["predicted_" + target])
+                delta = (candidate_metrics["mae"] - base_metrics["mae"]
+                         if candidate_metrics["mae"] is not None and base_metrics["mae"] is not None else None)
+                targets[target] = {
+                    "ppg_only": base_metrics,
+                    "candidate": candidate_metrics,
+                    "mae_delta_candidate_minus_ppg_only": delta,
+                }
+                improvements.append(delta is not None and delta < 0)
+            base_coverage = coverage(base_band, base_band.accepted.to_numpy()) if len(base_band) else 0.0
+            candidate_coverage = coverage(candidate_band, candidate_band.accepted.to_numpy()) if len(candidate_band) else 0.0
+            bands[band] = {
+                "test_window_count": int(band_mask.sum()),
+                "common_accepted_window_count": int(common.sum()),
+                "common_accepted_unique_seconds": accepted_unique_seconds(base, common),
+                "ppg_only_accepted_coverage": base_coverage,
+                "candidate_accepted_coverage": candidate_coverage,
+                "coverage_delta_candidate_minus_ppg_only": candidate_coverage - base_coverage,
+                "targets": targets,
+                "improves_both_targets_on_common_windows": bool(common.any() and all(improvements)),
+            }
+        report[candidate_name + "_vs_ppg_only"] = bands
+    return report
+
+
 def prediction_report(output: pd.DataFrame, maximum_width: float) -> dict:
     report = {}
     for severity in ["all", "stationary", "motion", "mild", "moderate", "severe"]:
@@ -370,6 +462,9 @@ def evaluate_ablation(train: pd.DataFrame, uncertainty: pd.DataFrame, test: pd.D
     The caller supplies all test windows, including rejected windows. Group-max
     residual intervals reduce pseudoreplication from overlapping windows.
     """
+    train, uncertainty, test = (
+        attach_motion_band_features(frame, config) for frame in (train, uncertainty, test)
+    )
     for frame in (train, uncertainty, test):
         validate_reference(frame)
         if frame.participant_id.isna().any() or (frame.participant_id == "").any():
@@ -438,4 +533,5 @@ def evaluate_ablation(train: pd.DataFrame, uncertainty: pd.DataFrame, test: pd.D
         subset = output.loc[common]
         report['common_accepted_comparison'][output.model.iloc[0]] = {
             target: metrics(subset['true_' + target], subset['predicted_' + target]) for target in ('sbp', 'dbp')}
+    report["imu_ablation_comparison"] = ablation_comparison(predictions[:3])
     return pd.concat(predictions, ignore_index=True), report

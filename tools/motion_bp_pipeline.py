@@ -72,6 +72,20 @@ def main() -> None:
         predictions.to_csv(output / "predictions.csv", index=False)
         write_json(output / "evaluation.json", report)
         manifest["inputs"] = {key: {"path": str(path.resolve()), "sha256": sha256(path)} for key, path in zip(("train", "uncertainty", "test"), (args.train, args.uncertainty, args.test))}
+        print("Motion-aware BP ablation (research only):")
+        for comparison, bands in report["imu_ablation_comparison"].items():
+            print("- " + comparison)
+            for band in ("all", "stationary", "mild", "moderate", "severe"):
+                result = bands[band]
+                sbp = result["targets"]["sbp"]["mae_delta_candidate_minus_ppg_only"]
+                dbp = result["targets"]["dbp"]["mae_delta_candidate_minus_ppg_only"]
+                values = lambda value: "na" if value is None else f"{value:+.2f}"
+                print(
+                    f"  {band}: common={result['common_accepted_window_count']}, "
+                    f"unique={result['common_accepted_unique_seconds']:.1f}s, "
+                    f"coverage_delta={result['coverage_delta_candidate_minus_ppg_only']:+.3f}, "
+                    f"SBP_MAE_delta={values(sbp)}, DBP_MAE_delta={values(dbp)}"
+                )
     write_json(output / "run_manifest.json", manifest)
     print(json.dumps({"output_dir": str(output), "deployment_eligible": False}))
 

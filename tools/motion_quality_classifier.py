@@ -30,6 +30,12 @@ from sklearn.model_selection import LeaveOneGroupOut
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
 
+from motion_quality import (
+    MOTION_INTENSITY_COLUMN,
+    attach_motion_intensity,
+    motion_intensity_settings,
+)
+
 matplotlib.use("Agg")
 from matplotlib import pyplot as plt  # noqa: E402
 
@@ -318,6 +324,9 @@ def _prediction_row(
         "participant_id": source["participant_id"],
         "session_id": source["session_id"],
         "trial_id": source["trial_id"],
+        "start_s": source.get("start_s", np.nan),
+        "end_s": source.get("end_s", np.nan),
+        MOTION_INTENSITY_COLUMN: source.get(MOTION_INTENSITY_COLUMN, "unknown"),
         "reviewed_label": source["reviewed_label"],
         "true_unusable": int(true_unusable),
         "predicted_unusable": int(predicted_unusable),
@@ -352,6 +361,136 @@ def subtype_metrics(predictions: pd.DataFrame, model_name: str) -> dict[str, dic
             "recall": correct / len(group),
         }
     return result
+
+
+def _empty_stratified_metrics() -> dict[str, Any]:
+    return {
+        "window_count": 0,
+        "usable_count": 0,
+        "unusable_count": 0,
+        "balanced_accuracy": None,
+        "usable_recall": None,
+        "unusable_recall": None,
+        "unusable_precision": None,
+        "false_usable_count": 0,
+        "false_unusable_count": 0,
+        "roc_auc": None,
+        "confusion_matrix": [[0, 0], [0, 0]],
+        "supported_unique_seconds": None,
+        "true_usable_unique_seconds": None,
+        "predicted_usable_unique_seconds": None,
+        "true_usable_time_coverage": None,
+        "predicted_usable_time_coverage": None,
+    }
+
+
+def _interval_union_seconds(group: pd.DataFrame, selection: np.ndarray | None = None) -> float | None:
+    required = {"participant_id", "session_id", "trial_id", "start_s", "end_s"}
+    if not required.issubset(group.columns):
+        return None
+    selected = group if selection is None else group.loc[np.asarray(selection, dtype=bool)]
+    if selected.empty:
+        return 0.0
+    values = selected[["start_s", "end_s"]].to_numpy(dtype=float)
+    if not np.isfinite(values).all() or np.any(values[:, 1] <= values[:, 0]):
+        return None
+    total = 0.0
+    for _, trial in selected.groupby(["participant_id", "session_id", "trial_id"], sort=False):
+        cursor: float | None = None
+        for start, end in sorted(trial[["start_s", "end_s"]].itertuples(index=False, name=None)):
+            if cursor is None or start > cursor:
+                total += end - start
+                cursor = end
+            elif end > cursor:
+                total += end - cursor
+                cursor = end
+    return float(total)
+
+
+def _stratified_metric_summary(group: pd.DataFrame) -> dict[str, Any]:
+    """Return honest per-band metrics; two-class metrics need both labels."""
+    if group.empty:
+        return _empty_stratified_metrics()
+    truth = group["true_unusable"].to_numpy(dtype=int)
+    prediction = group["predicted_unusable"].to_numpy(dtype=int)
+    probability = group["unusable_probability"].to_numpy(dtype=float)
+    matrix = confusion_matrix(truth, prediction, labels=[0, 1])
+    true_usable, false_unusable = int(matrix[0, 0]), int(matrix[0, 1])
+    false_usable, true_unusable = int(matrix[1, 0]), int(matrix[1, 1])
+    usable_count = true_usable + false_unusable
+    unusable_count = true_unusable + false_usable
+    both_classes = usable_count > 0 and unusable_count > 0
+    supported_seconds = _interval_union_seconds(group)
+    true_usable_seconds = _interval_union_seconds(group, truth == 0)
+    predicted_usable_seconds = _interval_union_seconds(group, prediction == 0)
+    return {
+        "window_count": int(len(group)),
+        "usable_count": usable_count,
+        "unusable_count": unusable_count,
+        "balanced_accuracy": (
+            (true_usable / usable_count + true_unusable / unusable_count) / 2.0
+            if both_classes
+            else None
+        ),
+        "usable_recall": true_usable / usable_count if usable_count else None,
+        "unusable_recall": true_unusable / unusable_count if unusable_count else None,
+        "unusable_precision": (
+            true_unusable / (true_unusable + false_unusable)
+            if true_unusable + false_unusable
+            else None
+        ),
+        "false_usable_count": false_usable,
+        "false_unusable_count": false_unusable,
+        "roc_auc": (
+            float(roc_auc_score(truth, probability))
+            if both_classes and np.isfinite(probability).all()
+            else None
+        ),
+        "confusion_matrix": [[true_usable, false_unusable], [false_usable, true_unusable]],
+        "supported_unique_seconds": supported_seconds,
+        "true_usable_unique_seconds": true_usable_seconds,
+        "predicted_usable_unique_seconds": predicted_usable_seconds,
+        "true_usable_time_coverage": (
+            true_usable_seconds / supported_seconds
+            if supported_seconds and true_usable_seconds is not None
+            else None
+        ),
+        "predicted_usable_time_coverage": (
+            predicted_usable_seconds / supported_seconds
+            if supported_seconds and predicted_usable_seconds is not None
+            else None
+        ),
+    }
+
+
+def intensity_band_metrics(
+    predictions: pd.DataFrame,
+    model_names: list[str],
+    configured_bands: list[str],
+) -> list[dict[str, Any]]:
+    """Calculate diagnostic metrics for every model and configured intensity band."""
+    observed = [
+        str(value)
+        for value in predictions[MOTION_INTENSITY_COLUMN].dropna().astype(str).unique()
+        if str(value) not in configured_bands
+    ]
+    bands = [*configured_bands, *sorted(observed)]
+    rows: list[dict[str, Any]] = []
+    for model_name in model_names:
+        selected = predictions[predictions["model"] == model_name]
+        for band in bands:
+            metrics = _stratified_metric_summary(
+                selected[selected[MOTION_INTENSITY_COLUMN].astype(str) == band]
+            )
+            rows.append(
+                {
+                    "model": model_name,
+                    MOTION_INTENSITY_COLUMN: band,
+                    "diagnostic_only": True,
+                    **metrics,
+                }
+            )
+    return rows
 
 
 def feature_importance(model: Pipeline, feature_columns: list[str]) -> pd.DataFrame:
@@ -422,13 +561,24 @@ def train_and_evaluate(
     if not isinstance(settings, dict):
         raise ValueError("Configuration is missing classifier settings")
     frame, feature_columns, finalization = load_training_data(run_dir)
+    frame = attach_motion_intensity(frame, config)
     predictions, summaries, selected_name, gates_passed = evaluate_candidates(frame, feature_columns, settings)
     selected_summary = next(item for item in summaries if item["model"] == selected_name)
+    intensity = motion_intensity_settings(config)
+    configured_bands = list(intensity["labels"]) if intensity else ["unknown"]
+    per_band = intensity_band_metrics(
+        predictions,
+        [str(item["model"]) for item in summaries],
+        configured_bands,
+    )
 
     output_dir.mkdir(parents=True, exist_ok=False)
     predictions.to_csv(output_dir / "fold_predictions.csv", index=False)
     pd.DataFrame(summaries).drop(columns=["confusion_matrix"]).to_csv(
         output_dir / "model_metrics.csv", index=False
+    )
+    pd.DataFrame(per_band).drop(columns=["confusion_matrix"]).to_csv(
+        output_dir / "model_intensity_band_metrics.csv", index=False
     )
 
     truth = (1 - frame["usable"].astype(int)).to_numpy()
@@ -449,6 +599,7 @@ def train_and_evaluate(
         "training_window_count": int(len(frame)),
         "config_sha256": file_sha256(config_path),
         "reviewed_windows_sha256": finalization["reviewed_windows_sha256"],
+        "motion_intensity": intensity,
         "single_subject_development": True,
         "independent_validation": False,
         "deployment_eligible": False,
@@ -476,6 +627,12 @@ def train_and_evaluate(
         "selected_model_metrics": selected_summary,
         "selected_model_per_trial_metrics": per_trial_metrics(predictions, selected_name),
         "selected_model_subtype_metrics": subtype_metrics(predictions, selected_name),
+        "candidate_intensity_band_metrics": per_band,
+        "selected_model_per_intensity_band_metrics": [
+            row for row in per_band if row["model"] == selected_name
+        ],
+        "intensity_band_metrics_are_diagnostic_only": True,
+        "intensity_bands_used_as_classifier_features": False,
         "development_acceptance_gates": settings["acceptance"],
         "development_acceptance_passed": bool(gates_passed),
         "single_subject_development": True,
@@ -544,6 +701,7 @@ def evaluate_frozen_model(
         raise ValueError("Model package schema version does not match the validation configuration")
 
     frame, feature_columns, finalization = load_training_data(run_dir)
+    frame = attach_motion_intensity(frame, config)
     package_features = list(package["feature_columns"])
     if package_features != feature_columns:
         raise ValueError("Model package feature schema does not match the finalized validation data")
@@ -580,6 +738,9 @@ def evaluate_frozen_model(
         for index in range(len(frame))
     ]
     predictions = pd.DataFrame(prediction_rows)
+    intensity = motion_intensity_settings(config)
+    configured_bands = list(intensity["labels"]) if intensity else ["unknown"]
+    per_band = intensity_band_metrics(predictions, [model_name], configured_bands)
     metrics = metric_summary(truth, prediction, probability)
     metrics.update(
         {
@@ -595,6 +756,9 @@ def evaluate_frozen_model(
 
     output_dir.mkdir(parents=True, exist_ok=False)
     predictions.to_csv(output_dir / "validation_predictions.csv", index=False)
+    pd.DataFrame(per_band).drop(columns=["confusion_matrix"]).to_csv(
+        output_dir / "validation_intensity_band_metrics.csv", index=False
+    )
     report = {
         "schema_version": int(settings["schema_version"]),
         "created_at": datetime.now().astimezone().isoformat(timespec="seconds"),
@@ -620,6 +784,10 @@ def evaluate_frozen_model(
         "validation_metrics": metrics,
         "per_trial_metrics": per_trial_metrics(predictions, model_name),
         "subtype_metrics": subtype_metrics(predictions, model_name),
+        "motion_intensity": intensity,
+        "per_intensity_band_metrics": per_band,
+        "intensity_band_metrics_are_diagnostic_only": True,
+        "intensity_bands_used_as_classifier_features": False,
         "validation_acceptance_gates": settings["acceptance"],
         "validation_acceptance_passed": bool(metrics["passes_validation_gates"]),
         "independent_trial_validation": True,

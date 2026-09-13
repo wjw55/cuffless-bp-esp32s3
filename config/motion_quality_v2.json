@@ -1,0 +1,74 @@
+{
+  "schema_version": 2,
+  "protocol": "motion_quality_v1",
+  "window_seconds": 8.0,
+  "window_step_seconds": 4.0,
+  "guards": {
+    "recording_edge_seconds": 5.0,
+    "cue_transition_seconds": 2.0,
+    "early_recovery_seconds": 5.0
+  },
+  "timing": {
+    "minimum_completeness": 0.995,
+    "maximum_gap_ms": 20.0
+  },
+  "ppg": {
+    "bandpass_low_hz": 0.5,
+    "bandpass_high_hz": 8.0,
+    "filter_order": 4,
+    "pulse_band_low_hz": 0.5,
+    "pulse_band_high_hz": 3.0,
+    "minimum_hr_bpm": 40.0,
+    "maximum_hr_bpm": 180.0,
+    "template_samples": 128,
+    "minimum_beats_per_window": 4,
+    "maximum_interval_cv": 0.2,
+    "minimum_template_correlation": 0.6,
+    "maximum_clipped_fraction": 0.005
+  },
+  "imu": {
+    "scale_g_per_lsb": 0.0039,
+    "gravity_alpha": 0.01,
+    "activity_window_samples": 100,
+    "firmware_motion_threshold_g": 0.05
+  },
+  "motion_intensity": {
+    "source_feature": "imu_activity_mean_g",
+    "boundaries_g": [0.02, 0.08, 0.2],
+    "labels": ["stationary", "mild", "moderate", "severe"],
+    "thresholds_provisional": true,
+    "severe_policy": "unavailable"
+  },
+  "cross_modal": {
+    "maximum_lag_seconds": 1.0,
+    "frequency_low_hz": 0.5,
+    "frequency_high_hz": 8.0
+  },
+  "review": {
+    "windows_per_page": 8,
+    "minimum_clean": 20,
+    "minimum_motion_corrupted": 10,
+    "minimum_contact_corrupted": 10
+  },
+  "classifier": {
+    "schema_version": 2,
+    "random_seed": 20260910,
+    "minimum_trials": 3,
+    "decision_threshold": 0.5,
+    "acceptance": {
+      "minimum_balanced_accuracy": 0.8,
+      "minimum_usable_recall": 0.8,
+      "minimum_unusable_recall": 0.9
+    },
+    "logistic_l2": {
+      "c": 0.1,
+      "maximum_iterations": 5000
+    },
+    "random_forest": {
+      "trees": 400,
+      "maximum_depth": 3,
+      "minimum_leaf_samples": 3,
+      "maximum_features": "sqrt"
+    }
+  }
+}

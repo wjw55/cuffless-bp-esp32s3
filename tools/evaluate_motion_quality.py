@@ -13,6 +13,14 @@ from motion_quality import load_config
 from motion_quality_classifier import evaluate_frozen_model
 
 
+def _show_metric(value: float | None) -> str:
+    return "na" if value is None else f"{value:.3f}"
+
+
+def _show_percent(value: float | None) -> str:
+    return "na" if value is None else f"{100.0 * value:.1f}%"
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", type=Path, required=True)
@@ -58,6 +66,15 @@ def main(argv: list[str] | None = None) -> int:
             f"unusable_recall={metrics['unusable_recall']:.3f}"
         )
         print(f"Validation gates passed: {report['validation_acceptance_passed']}")
+        print("Frozen-model metrics by motion intensity (diagnostic only):")
+        for item in report["per_intensity_band_metrics"]:
+            print(
+                f"- {item['motion_intensity_band']}: windows={item['window_count']}, "
+                f"balanced_accuracy={_show_metric(item['balanced_accuracy'])}, "
+                f"usable_recall={_show_metric(item['usable_recall'])}, "
+                f"unusable_recall={_show_metric(item['unusable_recall'])}, "
+                f"reviewed_usable_time={_show_percent(item['true_usable_time_coverage'])}"
+            )
         print("Model refit on validation: False; population validated: False")
         return 0
     except (FileNotFoundError, ValueError, KeyError, OSError, RuntimeError, json.JSONDecodeError) as exc:

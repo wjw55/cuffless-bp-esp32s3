@@ -21,10 +21,16 @@ warning is evidence of uncertainty, not a measured inter-sensor offset. Do not
 correct it by maximizing PPG/IMU correlation. A future correction needs an
 independently evidenced clock mapping, retained alongside original timestamps.
 
-All limits in `config/motion_bp_v1.json`, including severity, contact and
-uncertainty limits, are provisional engineering settings. They are not calibrated
-upper-arm thresholds or acceptance criteria for deployment. The current 50,000
-count contact threshold is inherited conservatively and needs upper-arm review.
+All limits in `config/motion_bp_v1.json`, including contact and uncertainty
+limits, are provisional engineering settings. They are not calibrated upper-arm
+thresholds or acceptance criteria for deployment. The current 50,000 count
+contact threshold is inherited conservatively and needs upper-arm review.
+Motion intensity is imported from `config/motion_quality_v2.json`; there is no
+second set of severity thresholds in this pipeline. The shared configuration
+applies 0.02/0.08/0.20 g boundaries to the mean causal one-second rolling-RMS
+activity signal and reports `stationary`, `mild`, `moderate` and `severe`.
+These bands are signal-only model inputs and reporting strata. They do not enable
+live output or provide BP labels.
 
 Run from the repository root:
 
@@ -162,12 +168,15 @@ intervals must not overlap between chronological partitions. Personal calibratio
 values/features must stay fixed across partitions. Calibration outcomes are
 excluded from evaluation.
 
-The first ablation deliberately uses fixed regularized Ridge models, predicting
-BP change from calibration, with preprocessing fitted only on training data:
+The Stage 2 ablation deliberately uses fixed regularized Ridge models, predicting
+BP change from calibration, with imputation and scaling fitted only on training
+data:
 
 1. PPG morphology plus personal calibration.
-2. The same plus dynamic acceleration RMS and movement duration.
-3. The same plus the full allowlisted IMU/cross-modal feature set.
+2. The same plus mean activity, dynamic acceleration RMS, movement duration and
+   numeric mild/moderate/severe band indicators.
+3. The same plus the full allowlisted IMU/cross-modal feature set and the band
+   indicators.
 4. PPG prediction with IMU used only in the shared rejection gate. This is
    explicitly the same predictor as (1), serving as the rejection-only control.
 5. Personalized zero-change, evaluated on the PPG baseline's accepted windows.
@@ -181,8 +190,12 @@ fixtures as experimental accuracy.
 
 Reports include per-target MAE/RMSE/bias/max error, stationary/motion/severity
 strata, unique-time reference-labelled coverage, interval coverage, threshold
-error/coverage curves, reviewed corruption false acceptance, and comparisons on
-common accepted windows. Report operational coverage separately using the full
+error/coverage curves and reviewed corruption false acceptance. The
+`imu_ablation_comparison` section compares each IMU model with PPG-only within
+every motion band. It reports both models' accepted coverage and, on identical
+commonly accepted windows, unique time and SBP/DBP MAE differences. A missing
+common subset remains unavailable rather than becoming a zero error. Report
+operational coverage separately using the full
 acquisition timeline including missing data, warm-up and rejected intervals.
 The evaluator's window-union denominator is explicitly not total session time.
 With eight-second windows stepped every four seconds it measures supported signal
@@ -211,10 +224,12 @@ claims.
 ## Verification
 
 ```powershell
-& C:\wjw\Anaconda\python.exe -B -m unittest discover -s tools -p 'test_*.py'
+& C:\wjw\Anaconda\python.exe -B -m unittest discover -s tools\tests -p 'test_*.py'
 ```
 
-Tests cover unequal-rate timestamp extraction, nonfinite/gapped streams,
+Tests cover shared Stage 1 motion-band derivation, strict severe-motion rejection,
+PPG-only/PPG+IMU feature separation, common-window error and overlap-safe coverage,
+unequal-rate timestamp extraction, nonfinite/gapped streams,
 IMU-only admission, duration units, BP-independent gates, continuous-reference
 admission, grouped chronological/participant splits, calibration consistency,
 held-out label perturbation, error metrics, overlap-safe coverage and explicit

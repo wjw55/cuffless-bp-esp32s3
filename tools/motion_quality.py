@@ -19,6 +19,7 @@ from bp_core.features import extract_window_features
 ADC_MAX = (1 << 18) - 1
 REVIEW_LABELS = ("clean", "motion_corrupted", "contact_corrupted", "uncertain")
 REVIEW_COLUMNS = ["window_id", "reviewed_label", "reviewer", "review_notes"]
+MOTION_INTENSITY_COLUMN = "motion_intensity_band"
 HEALTH_COUNTERS = (
     "firmware_i2c_error_count",
     "firmware_fifo_overflow_count",
@@ -58,13 +59,78 @@ def _reason_counts(values: pd.Series) -> dict[str, int]:
 
 def load_config(path: Path) -> dict[str, Any]:
     config = json.loads(path.read_text(encoding="utf-8"))
-    if config.get("schema_version") != 1:
+    schema_version = config.get("schema_version")
+    if schema_version not in {1, 2}:
         raise ValueError("Unsupported motion-quality config schema")
     if float(config["window_seconds"]) <= 0 or float(config["window_step_seconds"]) <= 0:
         raise ValueError("Window and step durations must be positive")
     if not 0 < float(config["timing"]["minimum_completeness"]) <= 1:
         raise ValueError("timing.minimum_completeness must be in (0, 1]")
+    if schema_version >= 2:
+        motion_intensity_settings(config)
     return config
+
+
+def motion_intensity_settings(config: dict[str, Any]) -> dict[str, Any] | None:
+    """Validate and return optional signal-only motion-band settings."""
+    settings = config.get("motion_intensity")
+    if settings is None:
+        return None
+    source = str(settings.get("source_feature", "")).strip()
+    labels = [str(value).strip() for value in settings.get("labels", [])]
+    try:
+        boundaries = [float(value) for value in settings.get("boundaries_g", [])]
+    except (TypeError, ValueError) as exc:
+        raise ValueError("motion_intensity.boundaries_g must be numeric") from exc
+    if not source:
+        raise ValueError("motion_intensity.source_feature is required")
+    if len(labels) != len(boundaries) + 1 or any(not value for value in labels):
+        raise ValueError("motion_intensity.labels must contain one more entry than boundaries_g")
+    if len(set(labels)) != len(labels):
+        raise ValueError("motion_intensity.labels must be unique")
+    if not boundaries or not np.all(np.isfinite(boundaries)) or any(value <= 0 for value in boundaries):
+        raise ValueError("motion_intensity.boundaries_g must contain positive finite values")
+    if any(current <= previous for previous, current in zip(boundaries, boundaries[1:])):
+        raise ValueError("motion_intensity.boundaries_g must be strictly increasing")
+    if settings.get("severe_policy") != "unavailable":
+        raise ValueError("motion_intensity.severe_policy must remain unavailable")
+    return {**settings, "source_feature": source, "labels": labels, "boundaries_g": boundaries}
+
+
+def classify_motion_intensity(activity_g: Any, config: dict[str, Any]) -> str:
+    """Assign a deterministic context band without consulting PPG or BP labels."""
+    settings = motion_intensity_settings(config)
+    if settings is None:
+        return "unknown"
+    try:
+        value = float(activity_g)
+    except (TypeError, ValueError):
+        return "unknown"
+    if not np.isfinite(value) or value < 0:
+        return "unknown"
+    index = int(np.searchsorted(settings["boundaries_g"], value, side="right"))
+    return str(settings["labels"][index])
+
+
+def attach_motion_intensity(frame: pd.DataFrame, config: dict[str, Any]) -> pd.DataFrame:
+    """Add or verify bands in memory, supporting finalized v1 review tables."""
+    output = frame.copy()
+    settings = motion_intensity_settings(config)
+    if settings is None:
+        if MOTION_INTENSITY_COLUMN not in output:
+            output[MOTION_INTENSITY_COLUMN] = "unknown"
+        return output
+    source = settings["source_feature"]
+    if source not in output:
+        raise ValueError(f"Motion-intensity source feature is missing: {source}")
+    derived = output[source].map(lambda value: classify_motion_intensity(value, config))
+    if MOTION_INTENSITY_COLUMN in output:
+        supplied = output[MOTION_INTENSITY_COLUMN].fillna("unknown").astype(str)
+        mismatch = (supplied != "unknown") & (supplied != derived)
+        if mismatch.any():
+            raise ValueError("Stored motion-intensity bands do not match the configured RMS boundaries")
+    output[MOTION_INTENSITY_COLUMN] = derived
+    return output
 
 
 def _resolve_path(input_dir: Path, metadata_path: Path, value: Any, suffix: str) -> Path:
@@ -425,6 +491,11 @@ def _window_features(
         "cross_modal_max_lag_correlation": cross_correlation,
         "cross_modal_spectral_overlap": float(np.sum(np.minimum(p_norm, i_norm))),
     }
+    settings = motion_intensity_settings(config)
+    if settings is not None:
+        features[MOTION_INTENSITY_COLUMN] = classify_motion_intensity(
+            features[settings["source_feature"]], config
+        )
     return features, filtered, interpolated_dynamic
 
 
@@ -840,6 +911,23 @@ def prepare_dataset(config: dict[str, Any], input_dir: Path, session: str, outpu
             str(key): int(value)
             for key, value in reviewable["suggested_label"].value_counts().sort_index().items()
         },
+        "motion_intensity": config.get("motion_intensity"),
+        "candidate_motion_intensity_counts": (
+            {
+                str(key): int(value)
+                for key, value in features[MOTION_INTENSITY_COLUMN].value_counts(dropna=False).sort_index().items()
+            }
+            if MOTION_INTENSITY_COLUMN in features
+            else {}
+        ),
+        "reviewable_motion_intensity_counts": (
+            {
+                str(key): int(value)
+                for key, value in reviewable[MOTION_INTENSITY_COLUMN].value_counts(dropna=False).sort_index().items()
+            }
+            if MOTION_INTENSITY_COLUMN in reviewable
+            else {}
+        ),
         "protocol_exclusion_reason_counts": _reason_counts(features["protocol_exclusion_reasons"]),
         "window_rejection_reason_counts": _reason_counts(features["window_rejection_reasons"]),
         "trials": trial_reports,
@@ -875,6 +963,7 @@ def finalize_dataset(config: dict[str, Any], run_dir: Path) -> dict[str, Any]:
     if invalid:
         raise ValueError(f"Invalid or blank reviewed labels: {invalid}; allowed={list(REVIEW_LABELS)}")
     reviewed = features.merge(review, on="window_id", how="inner", validate="one_to_one")
+    reviewed = attach_motion_intensity(reviewed, config)
     reviewed["usable"] = reviewed["reviewed_label"].map(
         {"clean": 1, "motion_corrupted": 0, "contact_corrupted": 0}
     )
@@ -900,6 +989,14 @@ def finalize_dataset(config: dict[str, Any], run_dir: Path) -> dict[str, Any]:
         "reviewed_window_count": len(reviewed),
         "supervised_training_window_count": int(reviewed["supervised_training_eligible"].sum()),
         "label_counts": counts,
+        "motion_intensity": config.get("motion_intensity"),
+        "motion_intensity_label_counts": {
+            str(band): {
+                str(label): int(count)
+                for label, count in group["reviewed_label"].value_counts().sort_index().items()
+            }
+            for band, group in reviewed.groupby(MOTION_INTENSITY_COLUMN, sort=True)
+        },
         "training_readiness_warnings": warnings,
         "reviewed_windows_sha256": file_sha256(run_dir / "reviewed_windows.csv"),
     }

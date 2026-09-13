@@ -137,12 +137,19 @@ def positive_int(value: str) -> int:
     return parsed
 
 
+def overdue_streams(now: float, last_seen: dict[str, float], timeout: float | None) -> list[str]:
+    """Optional receipt watchdog; sensor timing/quality admission remains separate."""
+    return [] if timeout is None else [name for name, seen in last_seen.items() if now - seen >= timeout]
+
+
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Collect synchronized PPG and optional IMU rows from ESP32 serial output."
     )
     parser.add_argument("--port", required=True, help="Serial port, for example COM3")
     parser.add_argument("--duration", required=True, type=positive_float, help="Recording duration in seconds")
+    parser.add_argument("--required-stream-timeout", type=positive_float, default=None,
+                        help="Stop and save an interrupted attempt if either PPG or IMU is absent for this many seconds; off by default")
     parser.add_argument("--subject", required=True, help="Subject ID, for example S01")
     parser.add_argument("--session", required=True, help="Session name, for example test_001")
     parser.add_argument("--trial-id", default="", help="Trial ID, for example T01")
@@ -1642,7 +1649,16 @@ def main() -> int:
             if motion_protocol_run is not None:
                 motion_protocol_run.update(0.0)
 
+            stream_seen = {"ppg": recording_start_monotonic, "imu": recording_start_monotonic}
+            streams_confirmed = False
             while time.monotonic() < deadline:
+                timeout = getattr(args, "required_stream_timeout", None)
+                stalled = overdue_streams(time.monotonic(), stream_seen, timeout)
+                if stalled:
+                    interrupted = True
+                    print("ERROR: Required sensor stream absent: " + ", ".join(stalled)
+                          + ". Stopping early and saving this incomplete attempt.", flush=True)
+                    break
                 raw_line = ser.readline()
                 now = time.monotonic()
                 if motion_protocol_run is not None:
@@ -1701,6 +1717,7 @@ def main() -> int:
                 imu_row = parse_imu_row(line)
                 if imu_row is not None:
                     imu_rows.append(imu_row)
+                    stream_seen["imu"] = now
                     if motion_quality_shadow_state is not None and live_bp_viewer is None:
                         motion_quality_shadow_state.add_imu(imu_row)
                 else:
@@ -1709,8 +1726,13 @@ def main() -> int:
                         ignored_lines += 1
                     else:
                         rows.append(row)
+                        stream_seen["ppg"] = now
                         if motion_quality_shadow_state is not None and live_bp_viewer is None:
                             motion_quality_shadow_state.add_ppg(row)
+
+                if timeout is not None and not streams_confirmed and len(rows) >= 2 and len(imu_rows) >= 2:
+                    streams_confirmed = True
+                    print("# required_streams_active ppg=true imu=true", flush=True)
 
                 if motion_quality_shadow_state is not None:
                     if motion_quality_shadow.maybe_score_shadow(motion_quality_shadow_state):
