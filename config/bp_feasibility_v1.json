@@ -1,0 +1,20 @@
+{
+  "schema_version": 1,
+  "policy_name": "gap_tolerant_school_feasibility_v1",
+  "research_only": true,
+  "medical_device_validation": false,
+  "gap_detection_threshold_ms": 40.0,
+  "maximum_gap_events": 1,
+  "maximum_gap_span_ms": 200.0,
+  "gap_synchronization_tolerance_ms": 50.0,
+  "gap_guard_seconds": 1.0,
+  "minimum_accepted_windows_per_occasion": 3,
+  "minimum_unique_clean_coverage_seconds": 24.0,
+  "require_upper_arm_analyzer_acceptance": false,
+  "recovery_protocol": {
+    "trial_name_contains": "recovery",
+    "planned_movement_start_seconds": 90.0,
+    "planned_movement_end_seconds": 110.0,
+    "movement_guard_seconds": 1.0
+  }
+}

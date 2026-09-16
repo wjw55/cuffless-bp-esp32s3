@@ -584,6 +584,8 @@ def evaluate_personalized_models(
     config: dict[str, Any],
     evaluation_dataset: str,
     auxiliary_datasets: tuple[str, ...] = (),
+    *,
+    fit_final_models: bool = True,
 ) -> tuple[pd.DataFrame, list[dict[str, Any]], dict[str, tuple[Any, list[str]]]]:
     evaluation = examples[examples["dataset_id"] == evaluation_dataset].copy()
     participants = sorted(evaluation["participant_id"].unique()) if not evaluation.empty else []
@@ -646,29 +648,30 @@ def evaluate_personalized_models(
     final_models: dict[str, tuple[Any, list[str]]] = {}
     metrics = summarize_predictions(predictions, config)
     evaluation_metrics = metrics.get("evaluations", {}).get(evaluation_dataset, {})
-    full_training = pd.concat([evaluation, auxiliary], ignore_index=True)
-    for target in ("sbp", "dbp"):
-        available = evaluation_metrics.get(target, {})
-        learned = {name: value for name, value in available.items() if name in learned_models}
-        if not learned:
-            continue
-        best_name = min(learned, key=lambda name: learned[name]["mae"])
-        try:
-            estimator, columns, parameters = _fit_candidate(best_name, full_training, f"delta_{target}", config)
-        except ValueError:
-            continue
-        final_models[target] = (estimator, columns)
-        fold_parameters.append(
-            {
-                "evaluation": evaluation_dataset,
-                "held_out_participant": None,
-                "target": target,
-                "model": best_name,
-                "parameters": parameters,
-                "feature_count": len(columns),
-                "final_fit": True,
-            }
-        )
+    if fit_final_models:
+        full_training = pd.concat([evaluation, auxiliary], ignore_index=True)
+        for target in ("sbp", "dbp"):
+            available = evaluation_metrics.get(target, {})
+            learned = {name: value for name, value in available.items() if name in learned_models}
+            if not learned:
+                continue
+            best_name = min(learned, key=lambda name: learned[name]["mae"])
+            try:
+                estimator, columns, parameters = _fit_candidate(best_name, full_training, f"delta_{target}", config)
+            except ValueError:
+                continue
+            final_models[target] = (estimator, columns)
+            fold_parameters.append(
+                {
+                    "evaluation": evaluation_dataset,
+                    "held_out_participant": None,
+                    "target": target,
+                    "model": best_name,
+                    "parameters": parameters,
+                    "feature_count": len(columns),
+                    "final_fit": True,
+                }
+            )
     return predictions, fold_parameters, final_models
 
 
