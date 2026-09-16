@@ -459,6 +459,12 @@ class BPPipelineTests(unittest.TestCase):
             )
             self.assertTrue(any(item.get("held_out_participant") == "P0" for item in parameters))
 
+            _, parameters_only, final_models = evaluate_personalized_models(
+                examples, config, "one_month_wrist", fit_final_models=False
+            )
+            self.assertEqual(final_models, {})
+            self.assertFalse(any(item.get("final_fit") for item in parameters_only))
+
     def test_single_subject_split_is_chronological_deterministic_and_excludes_calibration(self):
         config = minimal_config(Path("."))
         occasions = single_subject_occasions(count=18, calibration_index=2).sample(
