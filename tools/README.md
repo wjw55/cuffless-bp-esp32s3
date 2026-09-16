@@ -38,6 +38,8 @@ The scripts kept directly in `tools/` are stable command-line entry points. Shar
 | `bp_pipeline.py` | Main stationary personalized PPG-to-BP pipeline. |
 | `bp_core/` | Shared dataset, feature, model, inference and reporting modules. |
 | `compare_bp_recovery.py` | Compare shorter post-motion recovery windows with the stationary policy. |
+| `evaluate_bp_feasibility.py` | Compare the unchanged strict BP gate with the gap-tolerant school-project feasibility gate. |
+| `evaluate_bp_feasibility_models.py` | Run evaluation-only participant-held-out personalized BP models from frozen feasibility occasion features. |
 | `motion_bp_pipeline.py` | Run the PPG-only versus PPG+IMU motion-band experiment. |
 | `motion_bp.py` | Shared motion-aware BP experiment implementation. |
 | `motion_feasibility.py` | Review whether PPG remains usable across motion categories. |

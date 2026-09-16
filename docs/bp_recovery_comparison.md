@@ -48,3 +48,68 @@ on the offline findings and the subsequent six-occasion confirmation.
 
 Essential additions: the comparison script, its regression tests, and this note.
 No trained models or generated results belong in version control.
+
+## Separate gap-tolerant feasibility policy
+
+The strict policy above remains unchanged. For school-project feasibility reporting,
+one brief synchronized PPG/IMU interruption may instead be evaluated with the
+separate `config/bp_feasibility_v1.json` policy:
+
+```powershell
+& 'C:\wjw\Anaconda\python.exe' tools\evaluate_bp_feasibility.py `
+  --session-contains ah_staff_day1_20260916 `
+  --output-dir data\processed\bp_feasibility_v1\ah_staff_day1
+```
+
+This policy permits at most one synchronized gap no longer than 200 ms, removes a
+one-second margin on both sides, splits processing into continuous intervals, and
+never interpolates or constructs an eight-second window across the break. For a
+recovery trial, the planned 90–110 second movement block plus a one-second margin
+is also excluded even if firmware reports `still`. It requires at least three
+accepted windows and 24 seconds of non-overlapping clean coverage. Positive I2C or
+FIFO error counters, non-monotonic data, unsynchronized gaps, repeated gaps and
+long gaps still reject the recording.
+
+Outputs include strict and feasibility feature tables, explicit gap events and a
+side-by-side `policy_comparison.csv`. A recording accepted only by the feasibility
+policy is development evidence; it does not become strict training or validation
+data. BP labels are carried into the feature table for later evaluation but never
+influence the signal-quality decision.
+
+After freezing the feasibility gate, run the evaluation-only personalized model
+comparison:
+
+```powershell
+& 'C:\wjw\Anaconda\python.exe' tools\evaluate_bp_feasibility_models.py `
+  --config config\bp_pipeline_v1.json `
+  --occasion-features data\processed\bp_feasibility_v1\ah_staff_day1\feasibility_occasion_features.csv `
+  --output-dir data\processed\bp_feasibility_v1\ah_staff_day1_model_evaluation
+```
+
+The first explicitly marked usable occasion, or otherwise the first chronological
+usable occasion, supplies each participant's calibration BP and morphology. It is
+excluded from metrics. Leave-one-participant-out folds train on the other people
+and predict every later occasion for the held-out person using only that person's
+calibration. Zero-change, mean-change, HR-only, Ridge, Elastic Net and constrained
+histogram gradient boosting are compared. The command writes predictions, fold
+parameters, metrics and leakage-auditable split/calibration manifests, but fits and
+saves no final deployment model. These same-day results remain pilot development
+evidence; model selection must be frozen before a new multi-day validation batch.
+
+To compare the AH-only dataset with all compatible P001 data and a balanced P001
+subset, run:
+
+```powershell
+& 'C:\wjw\Anaconda\python.exe' tools\evaluate_bp_feasibility_models.py `
+  --config config\bp_pipeline_v1.json `
+  --ah-occasion-features data\processed\bp_feasibility_v1\ah_staff_day1\feasibility_occasion_features.csv `
+  --p001-occasion-features data\processed\bp_feasibility_v1\P001_inventory\feasibility_occasion_features.csv `
+  --output-dir data\processed\bp_feasibility_v1\combined_model_comparison
+```
+
+This creates `ah_only`, `combined_all` and `combined_balanced` evaluations. The
+balanced experiment retains P001's calibration and caps P001 follow-ups to the
+median AH follow-up count, preferring one stationary and one recovery occasion.
+All experiments report both occasion-weighted and participant-balanced metrics;
+the latter is the primary pass decision so P001's larger history cannot dominate
+the result. No final model is fitted or saved.

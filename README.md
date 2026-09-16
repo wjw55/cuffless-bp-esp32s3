@@ -518,6 +518,17 @@ The normal viewer still requires 85 seconds of continuous `Still` data. For deve
 
 Fast estimates are prominently labelled `EXPERIMENTAL FAST ESTIMATE`. The completed P001 development replay recovered after the final `Still` state in approximately 30–34 seconds in four recovery trials, but retained only 71.2% of standard-policy updates against an 80% target. The option is therefore not the default and is not a validation claim.
 
+For school-project feasibility analysis only, `tools/evaluate_bp_feasibility.py`
+compares the unchanged strict occasion gate with a separate gap-tolerant policy.
+The feasibility policy can retain unaffected windows around one brief synchronized
+PPG/IMU interruption and excludes the planned recovery-trial movement block. It
+never bridges a gap and does not alter training, saved models, firmware or the live
+viewer. See [docs/bp_recovery_comparison.md](docs/bp_recovery_comparison.md#separate-gap-tolerant-feasibility-policy).
+The companion `tools/evaluate_bp_feasibility_models.py` command performs an
+evaluation-only leave-one-participant-out comparison against zero-change and does
+not save a deployable model. It can also compare AH-only, AH plus all compatible
+P001 occasions, and a capped P001 subset using participant-balanced metrics.
+
 The viewer now also shows the configured IMU intensity as `Stationary`, `Mild`, `Moderate`, `Severe` or `Unknown`. The first four are the shared Stage 1 diagnostic bands; `Unknown` covers warm-up, stale or unavailable data. This display does not change BP behavior: firmware `Still`/`Moving` remains the controlling safety gate, and BP is still hidden whenever `Moving` is reported.
 
 Before BP features enter training or prediction, one shared occasion-level gate now checks raw PPG sequence/timestamp continuity, all reported PPG/IMU I2C and FIFO counters, the conservative upper-arm analyzer, motion/contact masks, the configurable accepted-window minimum, and at least 60 seconds of unique clean coverage. Overlapping 8-second windows are unioned rather than counted repeatedly. Rejected occasions and their explicit reasons are saved in `rejected_occasions.csv`.
