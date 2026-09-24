@@ -49,8 +49,18 @@ ANALYSIS_PERIOD_SECONDS = 5.0
 ANALYSIS_STALE_SECONDS = 12.0
 MOTION_STALE_SECONDS = 3.0
 CONNECTION_STALE_SECONDS = 5.0
+DEFAULT_LAST_VALIDATED_MAX_AGE_SECONDS = 300.0
 MAX_RECENT_WARNINGS = 3
 SERIAL_RECEIVE_BUFFER_BYTES = 65_536
+
+HOLDABLE_LAST_VALIDATED_STATUSES = {
+    "warming_up",
+    "motion_detected",
+    "contact_artifact",
+    "motion_contaminated",
+    "poor_waveform_quality",
+    "insufficient_clean_data",
+}
 
 VALIDATION_COLUMNS = [
     "elapsed_s",
@@ -62,6 +72,11 @@ VALIDATION_COLUMNS = [
     "delta_dbp",
     "status",
     "reason",
+    "display_mode",
+    "estimate_age_s",
+    "estimate_sensor_timestamp_ms",
+    "current_status",
+    "current_reason",
     "model_eligible",
     "allow_unvalidated",
     "buffer_s",
@@ -100,6 +115,7 @@ STATUS_LABELS = {
     "invalid_model_output": "Invalid model output",
     "analysis_error": "Analysis error",
     "analysis_stale": "Analysis update stale",
+    "last_validated_estimate": "Last validated estimate",
 }
 
 
@@ -118,6 +134,26 @@ class ViewerContext:
     experimental_fast_bundle: BPModelBundle | None = None
     motion_intensity_config: dict | None = None
     motion_intensity_error: str | None = None
+    last_validated_max_age_seconds: float = DEFAULT_LAST_VALIDATED_MAX_AGE_SECONDS
+
+
+@dataclass(frozen=True)
+class LastValidatedBP:
+    result: BPInferenceResult
+    measured_at: float
+    sensor_timestamp_ms: int | None
+    participant_id: str
+    model_identity: str
+
+
+@dataclass(frozen=True)
+class BPDisplayResolution:
+    result: BPInferenceResult
+    current_result: BPInferenceResult
+    mode: str
+    age_s: float | None = None
+    sensor_timestamp_ms: int | None = None
+    source_status: str | None = None
 
 
 @dataclass
@@ -199,6 +235,7 @@ class BPViewerState:
     warnings: deque[str] = field(default_factory=lambda: deque(maxlen=MAX_RECENT_WARNINGS))
     motion_quality_shadow: MotionQualityShadowState | None = None
     motion_intensity: LiveMotionIntensityState | None = None
+    last_validated_bp: LastValidatedBP | None = None
 
 
 def positive_float(value: str) -> float:
@@ -246,6 +283,16 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument("--baud", type=int, default=DEFAULT_BAUD_RATE)
     parser.add_argument("--refresh", type=positive_float, default=DEFAULT_REFRESH_SECONDS)
+    parser.add_argument(
+        "--last-validated-max-age",
+        type=positive_float,
+        default=DEFAULT_LAST_VALIDATED_MAX_AGE_SECONDS,
+        metavar="SECONDS",
+        help=(
+            "maximum age of a held last-validated BP estimate during motion or temporary "
+            f"poor signal (default: {DEFAULT_LAST_VALIDATED_MAX_AGE_SECONDS:.0f} seconds)"
+        ),
+    )
     args = parser.parse_args(argv)
     if args.model_dir is None and (args.calibration_sbp is None or args.calibration_dbp is None):
         parser.error("pending mode requires --calibration-sbp and --calibration-dbp")
@@ -290,6 +337,7 @@ def load_viewer_context(args: argparse.Namespace) -> ViewerContext:
             motion_quality_error=motion_quality_error,
             motion_intensity_config=motion_intensity_config,
             motion_intensity_error=motion_intensity_error,
+            last_validated_max_age_seconds=float(args.last_validated_max_age),
         )
     try:
         bundle = load_model_bundle(
@@ -313,6 +361,7 @@ def load_viewer_context(args: argparse.Namespace) -> ViewerContext:
             motion_quality_error=motion_quality_error,
             motion_intensity_config=motion_intensity_config,
             motion_intensity_error=motion_intensity_error,
+            last_validated_max_age_seconds=float(args.last_validated_max_age),
         )
     return ViewerContext(
         participant_id=bundle.participant_id,
@@ -335,6 +384,7 @@ def load_viewer_context(args: argparse.Namespace) -> ViewerContext:
         ),
         motion_intensity_config=motion_intensity_config,
         motion_intensity_error=motion_intensity_error,
+        last_validated_max_age_seconds=float(args.last_validated_max_age),
     )
 
 
@@ -387,7 +437,7 @@ def update_state_from_line(state: BPViewerState, line: str, now: float) -> bool:
             sequence_gap = ppg[0] != previous[0] + 1
             timestamp_gap_ms = ppg[1] - previous[1]
             if ppg[0] <= previous[0] or timestamp_gap_ms <= 0:
-                reset_buffer(state, "warming_up", "sensor timestamps restarted")
+                reset_buffer(state, "invalid_timing", "sensor timestamps restarted")
             elif sequence_gap or timestamp_gap_ms > 40:
                 reset_buffer(state, "invalid_timing", "PPG continuity fault; clean collection restarted")
         state.ppg_samples.append(ppg)
@@ -500,6 +550,42 @@ def trailing_analysis_inputs(
     return selected, result_metadata
 
 
+def _model_identity(context: ViewerContext) -> str:
+    """Return a stable identity for preventing cross-model held estimates."""
+
+    if context.bundle is None:
+        return "no-model"
+    bundle = context.bundle
+    model_dir = getattr(bundle, "model_dir", "")
+    calibration_id = getattr(bundle, "calibration_id", "")
+    manifest = getattr(bundle, "manifest", {})
+    config_hash = manifest.get("config_sha256", "") if isinstance(manifest, dict) else ""
+    return "|".join(
+        [
+            str(context.participant_id),
+            str(calibration_id) if isinstance(calibration_id, (str, int)) else "",
+            str(model_dir) if isinstance(model_dir, (str, Path)) else "",
+            str(config_hash),
+        ]
+    )
+
+
+def _remember_validated_bp(
+    state: BPViewerState,
+    context: ViewerContext,
+    now: float,
+) -> None:
+    if not state.result.numeric_available:
+        return
+    state.last_validated_bp = LastValidatedBP(
+        result=replace(state.result),
+        measured_at=now,
+        sensor_timestamp_ms=state.last_analysis_sensor_ms,
+        participant_id=context.participant_id,
+        model_identity=_model_identity(context),
+    )
+
+
 def maybe_predict(
     state: BPViewerState,
     context: ViewerContext,
@@ -548,6 +634,7 @@ def maybe_predict(
                     f"{state.result.reason}"
                 ),
             )
+        _remember_validated_bp(state, context, now)
     except Exception as exc:
         state.result = BPInferenceResult("analysis_error", str(exc))
     return True
@@ -567,6 +654,66 @@ def effective_result(state: BPViewerState, now: float) -> BPInferenceResult:
         if now - state.last_analysis_at > ANALYSIS_STALE_SECONDS:
             return BPInferenceResult("analysis_stale", "BP analysis update is stale")
     return state.result
+
+
+def resolve_display_bp(
+    state: BPViewerState,
+    context: ViewerContext,
+    now: float,
+) -> BPDisplayResolution:
+    """Resolve current versus held BP without weakening the inference gate."""
+
+    current = effective_result(state, now)
+    if current.numeric_available:
+        snapshot = state.last_validated_bp
+        age = max(0.0, now - snapshot.measured_at) if snapshot is not None else 0.0
+        return BPDisplayResolution(
+            result=current,
+            current_result=current,
+            mode="current",
+            age_s=age,
+            sensor_timestamp_ms=(
+                snapshot.sensor_timestamp_ms if snapshot is not None else state.last_analysis_sensor_ms
+            ),
+            source_status=current.status,
+        )
+
+    snapshot = state.last_validated_bp
+    if snapshot is None or current.status not in HOLDABLE_LAST_VALIDATED_STATUSES:
+        return BPDisplayResolution(result=current, current_result=current, mode="unavailable")
+    if (
+        snapshot.participant_id != context.participant_id
+        or snapshot.model_identity != _model_identity(context)
+    ):
+        return BPDisplayResolution(result=current, current_result=current, mode="unavailable")
+
+    age = max(0.0, now - snapshot.measured_at)
+    if age > context.last_validated_max_age_seconds:
+        expired = replace(
+            current,
+            reason=(
+                f"{current.reason}; last validated estimate expired at "
+                f"{context.last_validated_max_age_seconds:.0f} s"
+            ),
+        )
+        return BPDisplayResolution(result=expired, current_result=current, mode="unavailable")
+
+    current_label = STATUS_LABELS.get(
+        current.status, current.status.replace("_", " ").title()
+    )
+    held = replace(
+        snapshot.result,
+        status="last_validated_estimate",
+        reason=f"Holding the last accepted estimate while current status is {current_label}: {current.reason}",
+    )
+    return BPDisplayResolution(
+        result=held,
+        current_result=current,
+        mode="held",
+        age_s=age,
+        sensor_timestamp_ms=snapshot.sensor_timestamp_ms,
+        source_status=snapshot.result.status,
+    )
 
 
 def connection_status(state: BPViewerState, now: float) -> str:
@@ -596,13 +743,39 @@ def live_motion_intensity(
     return tracker.band, tracker.mean_activity_g
 
 
+def _format_estimate_age(age_s: float | None) -> str:
+    if age_s is None:
+        return "--"
+    age_s = max(0.0, age_s)
+    if age_s < 60.0:
+        return f"{age_s:.0f} s ago"
+    minutes = int(age_s // 60.0)
+    seconds = int(age_s % 60.0)
+    return f"{minutes} min {seconds:02d} s ago"
+
+
 def render_screen(state: BPViewerState, context: ViewerContext, now: float, port: str, baud: int, saving: bool = False) -> str:
-    result = effective_result(state, now)
+    display = resolve_display_bp(state, context, now)
+    result = display.result
+    current = display.current_result
     numeric = result.numeric_available
     sbp = f"{result.sbp:.0f}" if numeric else "--"
     dbp = f"{result.dbp:.0f}" if numeric else "--"
-    delta = f"{result.delta_sbp:+.1f}/{result.delta_dbp:+.1f}" if numeric else "--/--"
+    delta = (
+        f"{result.delta_sbp:+.1f}/{result.delta_dbp:+.1f}"
+        if numeric and result.delta_sbp is not None and result.delta_dbp is not None
+        else "--/--"
+    )
     status = STATUS_LABELS.get(result.status, result.status.replace("_", " ").title())
+    current_status = STATUS_LABELS.get(
+        current.status, current.status.replace("_", " ").title()
+    )
+    bp_label = "Last validated BP" if display.mode == "held" else "Estimated BP"
+    display_mode = {
+        "current": "Current clean estimate",
+        "held": "Last validated estimate (not a new measurement)",
+        "unavailable": "No valid estimate",
+    }[display.mode]
     motion = str(state.latest_motion.get("status", "waiting")).replace("_", " ").title()
     intensity_band, intensity_g = live_motion_intensity(state, now)
     intensity = intensity_band.replace("_", " ").title()
@@ -612,10 +785,14 @@ def render_screen(state: BPViewerState, context: ViewerContext, now: float, port
         "EXPERIMENTAL UPPER-ARM PPG-TO-BP VIEWER",
         "=" * 64,
         "",
-        f"       Estimated BP: {sbp}/{dbp} mmHg",
+        f"{bp_label:>20}: {sbp}/{dbp} mmHg",
         f"    Estimated change: {delta} mmHg",
+        f"        Display mode: {display_mode}",
+        f"        Estimate age: {_format_estimate_age(display.age_s)}",
         f"              Status: {status}",
         f"              Reason: {result.reason}",
+        f"      Current status: {current_status}",
+        f"      Current reason: {current.reason}",
         "",
         f"         Participant: {context.participant_id}",
         (
@@ -681,7 +858,15 @@ def render_screen(state: BPViewerState, context: ViewerContext, now: float, port
         "RECENT WARNINGS",
     ])
     lines.extend(f"- {warning}" for warning in state.warnings) if state.warnings else lines.append("- none")
-    if result.status in {"unvalidated_estimate", "experimental_fast_estimate"}:
+    if display.mode == "held":
+        lines.extend(
+            [
+                "",
+                "HELD VALUE: This is the last accepted BP estimate; no new BP is",
+                "being measured while the current signal is unusable.",
+            ]
+        )
+    if display.source_status in {"unvalidated_estimate", "experimental_fast_estimate"}:
         lines.extend(["", "WARNING: UNVALIDATED DEVELOPMENT ESTIMATE"])
     if context.experimental_fast_window_seconds is not None:
         lines.extend(
@@ -702,7 +887,9 @@ def render_screen(state: BPViewerState, context: ViewerContext, now: float, port
 
 
 def build_validation_record(state: BPViewerState, context: ViewerContext, now: float, elapsed_s: float) -> dict:
-    result = effective_result(state, now)
+    display = resolve_display_bp(state, context, now)
+    result = display.result
+    current = display.current_result
     activity = state.latest_motion.get("activity_g")
     row = {
         "elapsed_s": round(max(0.0, elapsed_s), 3),
@@ -714,6 +901,13 @@ def build_validation_record(state: BPViewerState, context: ViewerContext, now: f
         "delta_dbp": round(result.delta_dbp, 2) if result.delta_dbp is not None else None,
         "status": result.status,
         "reason": result.reason,
+        "display_mode": display.mode,
+        "estimate_age_s": (
+            round(display.age_s, 3) if display.age_s is not None else None
+        ),
+        "estimate_sensor_timestamp_ms": display.sensor_timestamp_ms,
+        "current_status": current.status,
+        "current_reason": current.reason,
         "model_eligible": bool(context.bundle and context.bundle.viewer_eligible),
         "allow_unvalidated": context.allow_unvalidated,
         "buffer_s": round(buffer_duration_s(state), 3),

@@ -506,6 +506,8 @@ After `bp_pipeline.py single-subject` creates a model package, connect it withou
 
 Numeric BP is enabled by default only if both SBP and DBP models beat the zero-change baseline on the locked test. `--allow-unvalidated` permits an explicitly labelled development estimate; it must not be presented as validated BP. See [docs/bp_pipeline.md](docs/bp_pipeline.md) for offline prediction and optional collector capture commands.
 
+After the viewer obtains an accepted numeric estimate, it keeps that value for up to five minutes during movement, clean-buffer recovery, or a temporary waveform/contact rejection. The screen labels it `Last validated BP`, shows its age, and states that it is not a new measurement. A fresh accepted estimate replaces it. The held value is never used for prediction and is hidden immediately for stale/disconnected serial data, sensor timing or health faults, an incompatible model, or an application restart. Change the display-only expiry with `--last-validated-max-age SECONDS`; this does not relax any signal-quality or model gate.
+
 The normal viewer still requires 85 seconds of continuous `Still` data. For development demonstrations only, `--experimental-fast-window 30` attempts a quality-gated estimate from the latest 30 seconds and then falls back to the unchanged 85-second policy if short-window quality is insufficient:
 
 ```powershell
@@ -529,7 +531,7 @@ evaluation-only leave-one-participant-out comparison against zero-change and doe
 not save a deployable model. It can also compare AH-only, AH plus all compatible
 P001 occasions, and a capped P001 subset using participant-balanced metrics.
 
-The viewer now also shows the configured IMU intensity as `Stationary`, `Mild`, `Moderate`, `Severe` or `Unknown`. The first four are the shared Stage 1 diagnostic bands; `Unknown` covers warm-up, stale or unavailable data. This display does not change BP behavior: firmware `Still`/`Moving` remains the controlling safety gate, and BP is still hidden whenever `Moving` is reported.
+The viewer now also shows the configured IMU intensity as `Stationary`, `Mild`, `Moderate`, `Severe` or `Unknown`. The first four are the shared Stage 1 diagnostic bands; `Unknown` covers warm-up, stale or unavailable data. This display does not change BP inference: firmware `Still`/`Moving` remains the controlling safety gate, so no new BP is calculated while `Moving` is reported. A recent accepted value may remain visible only as the clearly aged `Last validated BP` described above.
 
 Before BP features enter training or prediction, one shared occasion-level gate now checks raw PPG sequence/timestamp continuity, all reported PPG/IMU I2C and FIFO counters, the conservative upper-arm analyzer, motion/contact masks, the configurable accepted-window minimum, and at least 60 seconds of unique clean coverage. Overlapping 8-second windows are unioned rather than counted repeatedly. Rejected occasions and their explicit reasons are saved in `rejected_occasions.csv`.
 

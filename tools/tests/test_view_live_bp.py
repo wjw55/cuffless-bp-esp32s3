@@ -430,7 +430,7 @@ class BPViewerTests(unittest.TestCase):
         self.assertIn("Estimated BP: --/--", screen)
         self.assertIn("Model validation pending", screen)
 
-    def test_numeric_result_is_hidden_immediately_on_motion(self):
+    def test_last_validated_result_is_held_during_motion(self):
         state = BPViewerState(started_at=0.0)
         add_still_data(state)
         context = ViewerContext("P001", 116, 72, config(), bundle=Mock(viewer_eligible=True))
@@ -444,7 +444,70 @@ class BPViewerTests(unittest.TestCase):
             state, "# motion timestamp_ms=87000 status=moving activity_g=0.2 threshold_g=0.05", 87.0
         )
         self.assertEqual(buffer_duration_s(state), 0.0)
-        self.assertIn("Estimated BP: --/--", render_screen(state, context, 87.1, "COM5", 115200))
+        screen = render_screen(state, context, 87.1, "COM5", 115200)
+        self.assertIn("Last validated BP: 114/73", screen)
+        self.assertIn("Last validated estimate (not a new measurement)", screen)
+        self.assertIn("Current status: Motion detected", screen)
+        self.assertIn("HELD VALUE", screen)
+
+    def test_last_validated_result_expires(self):
+        state = BPViewerState(started_at=0.0)
+        add_still_data(state)
+        context = ViewerContext(
+            "P001",
+            116,
+            72,
+            config(),
+            bundle=Mock(viewer_eligible=True),
+            last_validated_max_age_seconds=0.5,
+        )
+        result = BPInferenceResult("prediction_ready", "accepted", sbp=114, dbp=73)
+        maybe_predict(state, context, 86.0, predictor=lambda *_args: result)
+        update_state_from_line(
+            state, "# motion timestamp_ms=87000 status=moving activity_g=0.2 threshold_g=0.05", 87.0
+        )
+
+        screen = render_screen(state, context, 87.1, "COM5", 115200)
+
+        self.assertIn("Estimated BP: --/--", screen)
+        self.assertIn("last validated estimate expired", screen)
+
+    def test_new_accepted_estimate_replaces_held_snapshot(self):
+        state = BPViewerState(started_at=0.0)
+        add_still_data(state)
+        context = ViewerContext("P001", 116, 72, config(), bundle=Mock(viewer_eligible=True))
+        first = BPInferenceResult("prediction_ready", "first", sbp=114, dbp=73)
+        second = BPInferenceResult("prediction_ready", "second", sbp=119, dbp=76)
+        maybe_predict(state, context, 86.0, predictor=lambda *_args: first)
+        update_state_from_line(
+            state, "# motion timestamp_ms=91000 status=still activity_g=0.01 threshold_g=0.05", 91.1
+        )
+        maybe_predict(state, context, 91.1, predictor=lambda *_args: second)
+        update_state_from_line(
+            state, "# motion timestamp_ms=92000 status=moving activity_g=0.2 threshold_g=0.05", 92.0
+        )
+
+        screen = render_screen(state, context, 92.1, "COM5", 115200)
+
+        self.assertIn("Last validated BP: 119/76", screen)
+        self.assertNotIn("Last validated BP: 114/73", screen)
+
+    def test_held_snapshot_is_not_reused_for_another_participant(self):
+        state = BPViewerState(started_at=0.0)
+        add_still_data(state)
+        bundle = Mock(viewer_eligible=True)
+        context = ViewerContext("P001", 116, 72, config(), bundle=bundle)
+        result = BPInferenceResult("prediction_ready", "accepted", sbp=114, dbp=73)
+        maybe_predict(state, context, 86.0, predictor=lambda *_args: result)
+        update_state_from_line(
+            state, "# motion timestamp_ms=87000 status=moving activity_g=0.2 threshold_g=0.05", 87.0
+        )
+        other_context = ViewerContext("P002", 120, 80, config(), bundle=bundle)
+
+        screen = render_screen(state, other_context, 87.1, "COM5", 115200)
+
+        self.assertIn("Estimated BP: --/--", screen)
+        self.assertNotIn("Last validated BP", screen)
 
     def test_shadow_unusable_prediction_does_not_gate_bp(self):
         state = BPViewerState(started_at=0.0)
@@ -478,6 +541,20 @@ class BPViewerTests(unittest.TestCase):
 
         self.assertIn("Estimated BP: --/--", screen)
         self.assertIn("serial data is stale", screen)
+
+    def test_numeric_result_is_hidden_after_sensor_timing_fault(self):
+        state = BPViewerState(started_at=0.0)
+        add_still_data(state)
+        context = ViewerContext("P001", 116, 72, config(), bundle=Mock(viewer_eligible=True))
+        result = BPInferenceResult("prediction_ready", "accepted", sbp=114, dbp=73)
+        maybe_predict(state, context, 86.0, predictor=lambda *_args: result)
+        update_state_from_line(state, "9000,90000,80000,140000", 87.0)
+
+        screen = render_screen(state, context, 87.1, "COM5", 115200)
+
+        self.assertIn("Estimated BP: --/--", screen)
+        self.assertIn("PPG continuity fault", screen)
+        self.assertNotIn("Last validated BP", screen)
 
     def test_sequence_gap_and_new_health_error_restart_clean_buffer(self):
         state = BPViewerState(started_at=0.0)
@@ -520,16 +597,49 @@ class BPViewerTests(unittest.TestCase):
         maybe_predict(state, context, 86.0)
         row = build_validation_record(state, context, 86.0, 86.0)
         self.assertEqual(row["status"], "model_pending")
+        self.assertEqual(row["display_mode"], "unavailable")
+        self.assertEqual(row["current_status"], "model_pending")
         self.assertEqual(row["ppg_rate_hz"], 100.0)
         self.assertIsNone(row["sbp"])
+
+    def test_validation_record_distinguishes_held_from_current_status(self):
+        state = BPViewerState(started_at=0.0)
+        add_still_data(state)
+        context = ViewerContext("P001", 116, 72, config(), bundle=Mock(viewer_eligible=True))
+        result = BPInferenceResult("prediction_ready", "accepted", sbp=114, dbp=73)
+        maybe_predict(state, context, 86.0, predictor=lambda *_args: result)
+        update_state_from_line(
+            state, "# motion timestamp_ms=87000 status=moving activity_g=0.2 threshold_g=0.05", 87.0
+        )
+
+        row = build_validation_record(state, context, 87.1, 87.1)
+
+        self.assertEqual(row["display_mode"], "held")
+        self.assertEqual(row["status"], "last_validated_estimate")
+        self.assertEqual(row["current_status"], "motion_detected")
+        self.assertEqual(row["sbp"], 114)
+        self.assertAlmostEqual(row["estimate_age_s"], 1.1)
 
     def test_cli_requires_calibration_only_without_model(self):
         args = parse_args(
             ["--port", "COM5", "--participant-id", "P001", "--calibration-sbp", "116", "--calibration-dbp", "72"]
         )
         self.assertEqual(args.calibration_sbp, 116)
+        self.assertEqual(args.last_validated_max_age, 300.0)
         with self.assertRaises(SystemExit), patch("sys.stderr", StringIO()):
             parse_args(["--port", "COM5", "--participant-id", "P001"])
+
+    def test_cli_accepts_last_validated_max_age_override(self):
+        args = parse_args(
+            [
+                "--port", "COM5",
+                "--participant-id", "P001",
+                "--calibration-sbp", "116",
+                "--calibration-dbp", "72",
+                "--last-validated-max-age", "120",
+            ]
+        )
+        self.assertEqual(args.last_validated_max_age, 120.0)
 
     def test_cli_accepts_optional_motion_quality_shadow_model(self):
         args = parse_args(
