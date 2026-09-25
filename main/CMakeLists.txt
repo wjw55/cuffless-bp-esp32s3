@@ -1,3 +1,3 @@
-idf_component_register(SRCS "motion_status.c" "main.c" "max30102.c" "adxl345.c" "live_hr.c" "ppg_clock.c"
+idf_component_register(SRCS "telemetry.c" "motion_status.c" "main.c" "max30102.c" "adxl345.c" "live_hr.c" "ppg_clock.c"
                     INCLUDE_DIRS "."
-                    REQUIRES driver esp_timer)
+                    REQUIRES bt driver esp_driver_usb_serial_jtag esp_timer nvs_flash)

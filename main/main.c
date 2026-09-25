@@ -11,6 +11,7 @@
 #include "max30102.h"
 #include "motion_status.h"
 #include "ppg_clock.h"
+#include "telemetry.h"
 
 _Static_assert(MAX30102_SAMPLE_PERIOD_US == PPG_CLOCK_PERIOD_US, "PPG clock period mismatch");
 
@@ -56,7 +57,7 @@ static void print_i2c_warning_throttled(
         return;
     }
 
-    printf("# warning event=%s error=%s i2c_errors=%" PRIu32 "\n",
+    telemetry_printf("# warning event=%s error=%s i2c_errors=%" PRIu32 "\n",
            event,
            esp_err_to_name(result),
            max30102_get_i2c_error_count());
@@ -65,6 +66,11 @@ static void print_i2c_warning_throttled(
 
 void app_main(void)
 {
+    esp_err_t telemetry_result = telemetry_init();
+    if (telemetry_result != ESP_OK) {
+        printf("# warning event=ble_init_failed error=%s action=usb_only\n",
+               esp_err_to_name(telemetry_result));
+    }
     ESP_ERROR_CHECK(i2c_master_init());
 
     if (!max30102_is_connected()) {
@@ -77,16 +83,16 @@ void app_main(void)
     if (imu_enabled) {
         esp_err_t imu_init_result = adxl345_init();
         if (imu_init_result != ESP_OK) {
-            printf("# warning event=imu_init_failed error=%s\n", esp_err_to_name(imu_init_result));
+            telemetry_printf("# warning event=imu_init_failed error=%s\n", esp_err_to_name(imu_init_result));
             imu_enabled = false;
         }
     } else {
-        printf("# warning event=imu_not_detected address=0x%02X action=ppg_only\n", ADXL345_I2C_ADDRESS);
+        telemetry_printf("# warning event=imu_not_detected address=0x%02X action=ppg_only\n", ADXL345_I2C_ADDRESS);
     }
 
-    printf("sample_seq,timestamp_ms,red,ir\n");
+    telemetry_printf("sample_seq,timestamp_ms,red,ir\n");
     if (imu_enabled) {
-        printf("imu,imu_seq,timestamp_ms,x_raw,y_raw,z_raw\n");
+        telemetry_printf("imu,imu_seq,timestamp_ms,x_raw,y_raw,z_raw\n");
     }
 
     uint64_t sample_seq = 0;
@@ -155,17 +161,17 @@ void app_main(void)
                     overflow_recovery_count++;
                     timestamp_resync_count++;
 
-                    printf("# warning event=fifo_overflow count=%u total=%" PRIu32 "\n",
+                    telemetry_printf("# warning event=fifo_overflow count=%u total=%" PRIu32 "\n",
                            (unsigned)overflow_count,
                            overflow_count_total);
-                    printf("# warning event=fifo_overflow_recovery count=%" PRIu32
+                    telemetry_printf("# warning event=fifo_overflow_recovery count=%" PRIu32
                            " total=%" PRIu32 " sample_seq=%" PRIu64
                            " action=fifo_reset timestamp_cursor=fresh\n",
                            overflow_recovery_count,
                            overflow_recovery_count,
                            sample_seq);
                 } else {
-                    printf("# warning event=fifo_overflow_recovery_failed count=%u total=%" PRIu32
+                    telemetry_printf("# warning event=fifo_overflow_recovery_failed count=%u total=%" PRIu32
                            " sample_seq=%" PRIu64
                            " error=%s i2c_errors=%" PRIu32 "\n",
                            (unsigned)overflow_count,
@@ -207,7 +213,7 @@ void app_main(void)
             }
             timestamp_initialized = true;
             next_timestamp_lag_warning_us = TIMESTAMP_LAG_WARNING_STEP_US;
-            printf("# timestamp_sync event=%s sample_seq=%" PRIu64
+            telemetry_printf("# timestamp_sync event=%s sample_seq=%" PRIu64
                    " timestamp_us=%" PRId64 "\n",
                    (sample_seq == 0) ? "initial" : "resync_after_overflow",
                    sample_seq, next_sample_timestamp_us);
@@ -219,7 +225,7 @@ void app_main(void)
 
             if (lag_us > next_timestamp_lag_warning_us) {
                 timestamp_lag_warning_count++;
-                printf("# warning event=timestamp_lag sample_seq=%" PRIu64
+                telemetry_printf("# warning event=timestamp_lag sample_seq=%" PRIu64
                        " lag_us=%" PRId64 " expected_latest_us=%" PRId64
                        " read_time_us=%" PRId64 " next_sample_us=%" PRId64
                        " count=%" PRIu32 "\n",
@@ -242,7 +248,7 @@ void app_main(void)
             if (clock.rejected) {
                 ppg_clock_rejected_observations++;
                 if (last_ppg_clock_warning_us == 0 || read_time_us - last_ppg_clock_warning_us >= 1000000) {
-                    printf("# warning event=ppg_clock_observation_rejected phase_error_us=%" PRId64
+                    telemetry_printf("# warning event=ppg_clock_observation_rejected phase_error_us=%" PRId64
                            " count=%" PRIu32 "\n", clock.phase_error_us, ppg_clock_rejected_observations);
                     last_ppg_clock_warning_us = read_time_us;
                 }
@@ -281,7 +287,7 @@ void app_main(void)
                     timestamp_us = last_emitted_timestamp_us + PPG_CLOCK_MIN_SPACING_US;
                     next_sample_timestamp_us = timestamp_us;
                     timestamp_correction_count++;
-                    printf("# warning event=timestamp_correction sample_seq=%" PRIu64
+                    telemetry_printf("# warning event=timestamp_correction sample_seq=%" PRIu64
                            " corrected_timestamp_us=%" PRId64 " count=%" PRIu32 "\n",
                            sample_seq,
                            timestamp_us,
@@ -289,12 +295,12 @@ void app_main(void)
                 }
 
                 int64_t timestamp_ms = timestamp_us / 1000;
-                printf("%" PRIu64 ",%" PRId64 ",%" PRIu32 ",%" PRIu32 "\n", sample_seq, timestamp_ms, red, ir);
+                telemetry_ppg_sample(sample_seq, timestamp_ms, red, ir);
                 live_hr_report_t hr_report = {0};
                 if (live_hr_process_sample(&live_hr_state, timestamp_ms, ir, finger_present, &hr_report)) {
                     if (hr_report.status == LIVE_HR_STABLE) {
                         uint32_t bpm_tenths = (uint32_t)((hr_report.bpm * 10.0f) + 0.5f);
-                        printf("# hr timestamp_ms=%" PRId64 " bpm=%" PRIu32 ".%" PRIu32
+                        telemetry_printf("# hr timestamp_ms=%" PRId64 " bpm=%" PRIu32 ".%" PRIu32
                                " status=%s beats=%u\n",
                                hr_report.timestamp_ms,
                                bpm_tenths / 10,
@@ -302,7 +308,7 @@ void app_main(void)
                                live_hr_status_name(hr_report.status),
                                (unsigned)hr_report.beats);
                     } else {
-                        printf("# hr timestamp_ms=%" PRId64 " bpm=na status=%s beats=%u\n",
+                        telemetry_printf("# hr timestamp_ms=%" PRId64 " bpm=na status=%s beats=%u\n",
                                hr_report.timestamp_ms,
                                live_hr_status_name(hr_report.status),
                                (unsigned)hr_report.beats);
@@ -312,7 +318,7 @@ void app_main(void)
                 next_sample_timestamp_us = timestamp_us + MAX30102_SAMPLE_PERIOD_US;
                 sample_seq++;
             } else {
-                printf("# warning event=fifo_read_failed i2c_errors=%" PRIu32 "\n",
+                telemetry_printf("# warning event=fifo_read_failed i2c_errors=%" PRIu32 "\n",
                        max30102_get_i2c_error_count());
                 break;
             }
@@ -324,7 +330,7 @@ void app_main(void)
             uint8_t imu_entries = 0;
             esp_err_t imu_entries_result = adxl345_get_fifo_entries(&imu_entries);
             if (imu_entries_result != ESP_OK) {
-                printf("# warning event=imu_fifo_status_failed error=%s i2c_errors=%" PRIu32 "\n",
+                telemetry_printf("# warning event=imu_fifo_status_failed error=%s i2c_errors=%" PRIu32 "\n",
                        esp_err_to_name(imu_entries_result),
                        adxl345_get_i2c_error_count());
             } else if (imu_entries >= 32) {
@@ -334,7 +340,7 @@ void app_main(void)
                 imu_timestamp_initialized = false;
                 latest_imu_fifo_entries = 0;
                 esp_err_t reset_result = adxl345_reset_fifo();
-                printf("# warning event=imu_fifo_overflow count=%" PRIu32
+                telemetry_printf("# warning event=imu_fifo_overflow count=%" PRIu32
                        " sample_seq=%" PRIu64 " action=%s\n",
                        imu_fifo_overflow_count,
                        imu_sample_seq,
@@ -348,7 +354,7 @@ void app_main(void)
                     if (!imu_timestamp_initialized) {
                         next_imu_sample_timestamp_us = observed_oldest_timestamp_us;
                         imu_timestamp_initialized = true;
-                        printf("# imu_timestamp_sync event=%s sample_seq=%" PRIu64
+                        telemetry_printf("# imu_timestamp_sync event=%s sample_seq=%" PRIu64
                                " timestamp_us=%" PRId64 "\n",
                                (imu_sample_seq == 0) ? "initial" : "resync_after_overflow",
                                imu_sample_seq,
@@ -377,7 +383,7 @@ void app_main(void)
                     int16_t z = 0;
                     esp_err_t imu_read_result = adxl345_read_fifo_sample(&x, &y, &z);
                     if (imu_read_result != ESP_OK) {
-                        printf("# warning event=imu_fifo_read_failed error=%s i2c_errors=%" PRIu32 "\n",
+                        telemetry_printf("# warning event=imu_fifo_read_failed error=%s i2c_errors=%" PRIu32 "\n",
                                esp_err_to_name(imu_read_result),
                                adxl345_get_i2c_error_count());
                         break;
@@ -390,12 +396,12 @@ void app_main(void)
                         imu_timestamp_correction_count++;
                     }
 
-                    printf("imu,%" PRIu64 ",%" PRId64 ",%d,%d,%d\n",
-                           imu_sample_seq,
-                           timestamp_us / 1000,
-                           (int)x,
-                           (int)y,
-                           (int)z);
+                    telemetry_imu_sample(
+                        imu_sample_seq,
+                        timestamp_us / 1000,
+                        x,
+                        y,
+                        z);
                     motion_status_report_t motion_report = {0};
                     if (motion_status_process_sample(
                             &motion_state,
@@ -408,7 +414,7 @@ void app_main(void)
                             (uint32_t)((motion_report.activity_g * 1000.0f) + 0.5f);
                         uint32_t threshold_mg =
                             (uint32_t)((motion_report.moving_threshold_g * 1000.0f) + 0.5f);
-                        printf("# motion timestamp_ms=%" PRId64
+                        telemetry_printf("# motion timestamp_ms=%" PRId64
                                " status=%s activity_g=%" PRIu32 ".%03" PRIu32
                                " threshold_g=%" PRIu32 ".%03" PRIu32 "\n",
                                motion_report.timestamp_ms,
@@ -427,7 +433,7 @@ void app_main(void)
         } else {
             int64_t now_ms = esp_timer_get_time() / 1000;
             if (now_ms >= next_imu_unavailable_status_ms) {
-                printf("# motion timestamp_ms=%" PRId64
+                telemetry_printf("# motion timestamp_ms=%" PRId64
                        " status=%s activity_g=na threshold_g=na\n",
                        now_ms,
                        motion_status_name(MOTION_STATUS_IMU_UNAVAILABLE));
@@ -449,7 +455,7 @@ void app_main(void)
                 status = "low";
             }
 
-            printf("# signal_quality,timestamp_ms=%" PRId64 ",ir_min=%" PRIu32
+            telemetry_printf("# signal_quality,timestamp_ms=%" PRId64 ",ir_min=%" PRIu32
                    ",ir_max=%" PRIu32 ",ir_range=%" PRIu32 ",samples=%" PRIu32
                    ",status=%s\n",
                    quality_now_ms, ir_min, ir_max, ir_range, quality_sample_count, status);
@@ -473,7 +479,7 @@ void app_main(void)
                     ? ((sample_seq * 10000000ULL) / (uint64_t)total_elapsed_us)
                     : 0;
 
-            printf("# stats samples=%" PRIu64 " captured_samples=%" PRIu64
+            telemetry_printf("# stats samples=%" PRIu64 " captured_samples=%" PRIu64
                    " rate_hz=%" PRIu64 ".%" PRIu64
                    " effective_rate_hz=%" PRIu64 ".%" PRIu64
                    " fifo_avail=%u ovf=%" PRIu32 " i2c_errors=%" PRIu32
@@ -506,7 +512,7 @@ void app_main(void)
                     (acquisition_start_time_us > 0 && total_elapsed_us > 0)
                         ? ((imu_sample_seq * 10000000ULL) / (uint64_t)total_elapsed_us)
                         : 0;
-                printf("# imu_stats samples=%" PRIu64
+                telemetry_printf("# imu_stats samples=%" PRIu64
                        " rate_hz=%" PRIu64 ".%" PRIu64
                        " effective_rate_hz=%" PRIu64 ".%" PRIu64
                        " fifo_entries=%u fifo_overflows=%" PRIu32
@@ -529,6 +535,8 @@ void app_main(void)
                        imu_clock_adjustment_total_us);
                 last_stats_imu_sample_seq = imu_sample_seq;
             }
+
+            telemetry_print_ble_stats();
 
             last_stats_sample_seq = sample_seq;
             last_stats_time_us = stats_now_us;

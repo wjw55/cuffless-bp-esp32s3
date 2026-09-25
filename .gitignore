@@ -30,6 +30,7 @@ hardware/
 # Build artifacts and directories
 **/build/
 build/
+build_*/
 releases/
 *.o
 *.a
