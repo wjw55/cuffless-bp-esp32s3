@@ -24,6 +24,7 @@ from bp_core.inference import (
 from view_live_bp import (
     BPInferenceResult,
     BPViewerState,
+    LastValidatedBP,
     LiveMotionIntensityState,
     ViewerContext,
     buffer_duration_s,
@@ -620,6 +621,32 @@ class BPViewerTests(unittest.TestCase):
         self.assertEqual(row["sbp"], 114)
         self.assertAlmostEqual(row["estimate_age_s"], 1.1)
 
+    def test_disconnected_transport_hides_held_estimate(self):
+        state = BPViewerState(started_at=0.0, transport_connected=False)
+        state.result = BPInferenceResult(
+            "analysis_stale", "BLE disconnected; reconnecting"
+        )
+        context = ViewerContext("P001", 116, 72, config())
+        state.last_validated_bp = LastValidatedBP(
+            result=BPInferenceResult("prediction_ready", "accepted", sbp=118, dbp=74),
+            measured_at=5.0,
+            sensor_timestamp_ms=5000,
+            participant_id="P001",
+            model_identity="no-model",
+        )
+
+        screen = render_screen(
+            state,
+            context,
+            10.0,
+            "PPG-LOGGER-A1B2C3",
+            115200,
+            transport="ble",
+        )
+
+        self.assertIn("--/-- mmHg", screen)
+        self.assertIn("Disconnected; reconnecting", screen)
+
     def test_cli_requires_calibration_only_without_model(self):
         args = parse_args(
             ["--port", "COM5", "--participant-id", "P001", "--calibration-sbp", "116", "--calibration-dbp", "72"]
@@ -640,6 +667,21 @@ class BPViewerTests(unittest.TestCase):
             ]
         )
         self.assertEqual(args.last_validated_max_age, 120.0)
+
+    def test_cli_accepts_ble_without_serial_port(self):
+        args = parse_args(
+            [
+                "--transport", "ble",
+                "--ble-device", "PPG-LOGGER-A1B2C3",
+                "--participant-id", "P001",
+                "--calibration-sbp", "116",
+                "--calibration-dbp", "72",
+            ]
+        )
+
+        self.assertEqual(args.transport, "ble")
+        self.assertEqual(args.ble_device, "PPG-LOGGER-A1B2C3")
+        self.assertIsNone(args.port)
 
     def test_cli_accepts_optional_motion_quality_shadow_model(self):
         args = parse_args(

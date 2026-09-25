@@ -1,4 +1,4 @@
-# ESP32-S3 MAX30102 PPG + ADXL345 Motion Logger
+# XIAO ESP32-S3 MAX30102 PPG + ADXL345 Motion Logger
 
 Synchronized raw PPG and motion acquisition firmware for an ESP32-S3, MAX30102, and optional ADXL345. The validated path uses the ADXL345 as a signal-quality flag; a separate offline research path tests whether its features improve BP estimates during non-severe motion.
 
@@ -19,8 +19,8 @@ The PC utilities are grouped by workflow in the [tool catalogue](tools/README.md
 | --- | --- |
 | VIN or 3V3 | 3V3 |
 | GND | GND |
-| SDA | GPIO 8 |
-| SCL | GPIO 9 |
+| SDA | GPIO 5 (XIAO D4) |
+| SCL | GPIO 6 (XIAO D5) |
 | INT | Not used |
 
 The firmware enables internal I2C pullups, but many MAX30102 breakout boards already include pullups. If using a bare sensor board, add suitable external pullups, for example 4.7 kOhm to 3V3.
@@ -31,8 +31,8 @@ The GY-291/ADXL345 shares the same I2C bus:
 | --- | --- |
 | VCC | 3V3 |
 | GND | GND |
-| SDA | GPIO 8 |
-| SCL | GPIO 9 |
+| SDA | GPIO 5 (XIAO D4) |
+| SCL | GPIO 6 (XIAO D5) |
 | CS | High / I2C mode |
 | SDO or ALT ADDRESS | GND, selecting `0x53` |
 | INT1 / INT2 | Not used |
@@ -47,6 +47,11 @@ Open an ESP-IDF terminal before building. On Windows, use the ESP-IDF PowerShell
 cd C:\wjw\cuffless_bp_idf\ppg_logger
 idf.py set-target esp32s3
 ```
+
+`sdkconfig.defaults` is the tracked configuration source for BLE. If this checkout
+already has an older ignored `sdkconfig` from before BLE was added, move that file
+aside once and run `idf.py set-target esp32s3` again so ESP-IDF regenerates it from
+the tracked defaults.
 
 ## Build
 
@@ -84,6 +89,35 @@ imu,0,12346,-12,8,258
 ```
 
 Four-column numeric rows remain backward-compatible PPG records. Six-column rows tagged `imu` are ADXL345 records. Lines beginning with `#` are status/debug records.
+
+## USB Serial and BLE Transport
+
+The firmware acquires continuously after startup and supports the same records through USB serial or an unpaired BLE notification service. USB keeps the original newline-delimited text. BLE uses compact lossless sample packets so both 100 Hz streams fit even when Windows retains the 23-byte ATT MTU; the PC transport reconstructs the original text rows before existing parsers see them. CSV schemas and values therefore remain unchanged. USB writes are buffered and non-blocking, so an attached but unread USB port or a power-only USB source cannot stop sensor acquisition. The BLE peripheral advertises as `PPG-LOGGER-XXXXXX`, where the suffix is derived from the board MAC address. A `# ble_stats` line reports connection state, negotiated MTU, queue use, notifications, and dropped records.
+
+Install the optional PC dependency only on laptops that will use BLE:
+
+```powershell
+& "C:\wjw\Anaconda\python.exe" -m pip install -r requirements-ble.txt
+```
+
+Collect over BLE by closing any other BLE client and running:
+
+```powershell
+& "C:\wjw\Anaconda\python.exe" tools\collect_ppg.py `
+  --transport ble `
+  --ble-device PPG-LOGGER-A1B2C3 `
+  --duration 90 `
+  --subject P001 `
+  --session ble_validation `
+  --trial-id validation_001 `
+  --posture seated `
+  --sensor-location left_outer_upper_arm_5cm_above_elbow `
+  --ppg-profile upper_arm_experimental `
+  --imu-location left_upper_arm_adjacent_to_ppg `
+  --imu-orientation unmeasured
+```
+
+Omit `--ble-device` only when exactly one `PPG-LOGGER-*` device is nearby. The collector stops and saves an incomplete attempt if BLE disconnects. The BP viewer reconnects, hides stale BP, and rebuilds its clean buffer from post-reconnection samples. Existing serial commands remain unchanged. See [BLE transport and validation](docs/ble_transport.md) for UUIDs, behavior, and the hardware test sequence.
 
 ## Live Heart Rate
 

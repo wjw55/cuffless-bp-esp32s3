@@ -6,9 +6,10 @@ The scripts kept directly in `tools/` are stable command-line entry points. Shar
 
 | Tool | Purpose |
 | --- | --- |
-| `collect_ppg.py` | Record synchronized raw PPG and IMU data, metadata and optional reference labels. |
+| `collect_ppg.py` | Record synchronized raw PPG and IMU data, metadata and optional reference labels over USB serial or BLE. |
 | `analyze_trials.py` | Inspect recorded trials and run finger or upper-arm HR analysis. |
 | `upper_arm_hr.py` | Shared upper-arm HR and waveform-quality implementation used by analysis and viewers. |
+| `line_transport.py` | Shared blocking USB serial/BLE line source used by the collector and BP viewer. |
 
 ## Live presentation
 
@@ -16,7 +17,7 @@ The scripts kept directly in `tools/` are stable command-line entry points. Shar
 | --- | --- |
 | `view_live_hr.py` | Firmware live-HR terminal display, primarily for the finger profile. |
 | `view_live_upper_arm_hr.py` | PC rolling upper-arm HR preview. |
-| `view_live_bp.py` | Experimental PC rolling BP preview with safe model gating and an opt-in 30-second development policy. |
+| `view_live_bp.py` | Experimental PC rolling BP preview over USB serial or BLE, with safe model gating and an opt-in 30-second development policy. |
 
 ## Motion and signal quality
 

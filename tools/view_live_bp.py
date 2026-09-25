@@ -25,6 +25,12 @@ from bp_core.inference import (
     predict_frame,
 )
 from collect_ppg import parse_firmware_status_line, parse_imu_row, parse_ppg_row
+from line_transport import (
+    LineTransportError,
+    add_transport_arguments,
+    create_line_source,
+    validate_transport_arguments,
+)
 from motion_quality_shadow import (
     MotionQualityShadowBundle,
     MotionQualityShadowState,
@@ -236,6 +242,7 @@ class BPViewerState:
     motion_quality_shadow: MotionQualityShadowState | None = None
     motion_intensity: LiveMotionIntensityState | None = None
     last_validated_bp: LastValidatedBP | None = None
+    transport_connected: bool = True
 
 
 def positive_float(value: str) -> float:
@@ -250,7 +257,7 @@ def positive_float(value: str) -> float:
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Show quality-gated experimental BP from upper-arm PPG.")
-    parser.add_argument("--port", required=True, help="ESP32 serial port, for example COM5")
+    add_transport_arguments(parser, default_baud=DEFAULT_BAUD_RATE)
     parser.add_argument("--participant-id", required=True)
     parser.add_argument("--model-dir")
     parser.add_argument("--calibration-sbp", type=positive_float)
@@ -281,7 +288,6 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default="config/motion_quality_v2.json",
         help="Configuration containing the live Stationary/Mild/Moderate/Severe boundaries",
     )
-    parser.add_argument("--baud", type=int, default=DEFAULT_BAUD_RATE)
     parser.add_argument("--refresh", type=positive_float, default=DEFAULT_REFRESH_SECONDS)
     parser.add_argument(
         "--last-validated-max-age",
@@ -294,6 +300,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         ),
     )
     args = parser.parse_args(argv)
+    validate_transport_arguments(args, parser)
     if args.model_dir is None and (args.calibration_sbp is None or args.calibration_dbp is None):
         parser.error("pending mode requires --calibration-sbp and --calibration-dbp")
     if args.model_dir is None and args.allow_unvalidated:
@@ -717,6 +724,8 @@ def resolve_display_bp(
 
 
 def connection_status(state: BPViewerState, now: float) -> str:
+    if not state.transport_connected:
+        return "Disconnected; reconnecting"
     if state.last_line_at is None:
         return "Waiting for ESP32" if now - state.started_at <= CONNECTION_STALE_SECONDS else "No serial data"
     age = now - state.last_line_at
@@ -754,7 +763,15 @@ def _format_estimate_age(age_s: float | None) -> str:
     return f"{minutes} min {seconds:02d} s ago"
 
 
-def render_screen(state: BPViewerState, context: ViewerContext, now: float, port: str, baud: int, saving: bool = False) -> str:
+def render_screen(
+    state: BPViewerState,
+    context: ViewerContext,
+    now: float,
+    device: str,
+    baud: int,
+    saving: bool = False,
+    transport: str = "serial",
+) -> str:
     display = resolve_display_bp(state, context, now)
     result = display.result
     current = display.current_result
@@ -853,7 +870,11 @@ def render_screen(state: BPViewerState, context: ViewerContext, now: float, port
         "SENSOR HEALTH",
         _health_line("PPG", state.ppg_stats, "ovf"),
         _health_line("IMU", state.imu_stats, "fifo_overflows"),
-        f"Serial: {port} at {baud} baud | {connection_status(state, now)}",
+        (
+            f"BLE: {device} | {connection_status(state, now)}"
+            if transport == "ble"
+            else f"Serial: {device} at {baud} baud | {connection_status(state, now)}"
+        ),
         "",
         "RECENT WARNINGS",
     ])
@@ -932,48 +953,78 @@ def clear_and_render(screen: str, output=sys.stdout) -> None:
     output.flush()
 
 
-def import_serial():
-    try:
-        import serial  # type: ignore
-    except ImportError:
-        print("ERROR: pyserial is required. Install it with: python -m pip install pyserial", file=sys.stderr)
-        raise SystemExit(2)
-    return serial
-
-
-def run_viewer(args: argparse.Namespace, context: ViewerContext, serial_module, clock=time.monotonic, sleep=time.sleep) -> int:
+def run_viewer(
+    args: argparse.Namespace,
+    context: ViewerContext,
+    serial_module=None,
+    clock=time.monotonic,
+    sleep=time.sleep,
+) -> int:
     state = BPViewerState(started_at=clock())
     if context.motion_intensity_config is not None:
         state.motion_intensity = LiveMotionIntensityState(context.motion_intensity_config)
     if context.motion_quality_bundle is not None:
         state.motion_quality_shadow = MotionQualityShadowState(context.motion_quality_bundle)
     try:
-        with serial_module.Serial(args.port, args.baud, timeout=0.05) as serial_port:
+        source = create_line_source(
+            args,
+            timeout=0.05,
+            reconnect=getattr(args, "transport", "serial") == "ble",
+            serial_module=serial_module,
+        )
+        with source:
             try:
-                serial_port.set_buffer_size(rx_size=SERIAL_RECEIVE_BUFFER_BYTES)
+                source.set_buffer_size(rx_size=SERIAL_RECEIVE_BUFFER_BYTES)
             except (AttributeError, NotImplementedError, OSError):
                 pass
-            sleep(SERIAL_STARTUP_DELAY_SECONDS)
-            serial_port.reset_input_buffer()
+            if getattr(args, "transport", "serial") == "serial":
+                sleep(SERIAL_STARTUP_DELAY_SECONDS)
+                source.reset_input_buffer()
             next_refresh = clock()
             while True:
-                raw = serial_port.readline()
+                raw = source.readline()
                 now = clock()
+                connected = source.connected
+                if not connected and state.transport_connected:
+                    state.transport_connected = False
+                    reset_buffer(
+                        state,
+                        "analysis_stale",
+                        "BLE disconnected; reconnecting and discarding the clean buffer",
+                    )
+                elif connected and not state.transport_connected:
+                    state.transport_connected = True
+                    reset_buffer(
+                        state,
+                        "warming_up",
+                        "BLE reconnected; collecting a fresh continuous buffer",
+                    )
                 if raw:
                     update_state_from_line(state, raw.decode("utf-8", errors="replace"), now)
                 if now >= next_refresh:
                     if state.motion_quality_shadow is not None:
                         maybe_score_shadow(state.motion_quality_shadow)
                     maybe_predict(state, context, now)
-                    clear_and_render(render_screen(state, context, now, args.port, args.baud))
+                    clear_and_render(
+                        render_screen(
+                            state,
+                            context,
+                            now,
+                            source.display_name,
+                            args.baud,
+                            transport=getattr(args, "transport", "serial"),
+                        )
+                    )
                     next_refresh = now + args.refresh
     except KeyboardInterrupt:
         print("\nExperimental BP viewer stopped. No data was saved.")
         return 0
-    except serial_module.SerialException as exc:
+    except LineTransportError as exc:
+        transport = getattr(args, "transport", "serial")
+        destination = getattr(args, "port", None) or getattr(args, "ble_device", None) or "auto-discovery"
         print(
-            f"ERROR: Could not open or read {args.port} at {args.baud} baud.\nDetails: {exc}\n"
-            "Close the monitor, collector, or other program using the port.",
+            f"ERROR: Could not open or read {transport} device {destination}.\nDetails: {exc}\n"
+            "Close any other program using the device and check that it is powered.",
             file=sys.stderr,
         )
         return 1
@@ -982,7 +1033,7 @@ def run_viewer(args: argparse.Namespace, context: ViewerContext, serial_module, 
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     context = load_viewer_context(args)
-    return run_viewer(args, context, import_serial())
+    return run_viewer(args, context)
 
 
 if __name__ == "__main__":

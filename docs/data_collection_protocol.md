@@ -28,11 +28,11 @@ Typical MAX30102 wiring:
 | --- | --- |
 | VIN or 3V3 | 3V3 |
 | GND | GND |
-| SDA | GPIO 8 |
-| SCL | GPIO 9 |
+| SDA | GPIO 5 (XIAO D4) |
+| SCL | GPIO 6 (XIAO D5) |
 | INT | Not used |
 
-The ADXL345 shares SDA GPIO 8 and SCL GPIO 9, uses 3.3 V and common ground, has `CS` configured for I2C, and has `SDO/ALT ADDRESS` tied low for address `0x53`. Its interrupt pins are unused.
+The ADXL345 shares SDA GPIO 5 and SCL GPIO 6, uses 3.3 V and common ground, has `CS` configured for I2C, and has `SDO/ALT ADDRESS` tied low for address `0x53`. Its interrupt pins are unused.
 
 ## Subject Posture
 

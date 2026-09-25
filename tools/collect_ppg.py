@@ -31,6 +31,13 @@ from motion_study_protocol import (
     get_motion_protocol,
     write_motion_annotations,
 )
+from line_transport import (
+    LineTransportDisconnected,
+    LineTransportError,
+    add_transport_arguments,
+    create_line_source,
+    validate_transport_arguments,
+)
 
 
 ADC_MAX_VALUE = 0x3FFFF
@@ -77,6 +84,16 @@ IMU_FIRMWARE_STATS_METADATA_KEYS = {
     "timestamp_corrections": "imu_firmware_timestamp_correction_count",
     "clock_adjustments": "imu_firmware_clock_adjustment_count",
     "clock_adjustment_us": "imu_firmware_clock_adjustment_total_us",
+}
+
+BLE_FIRMWARE_STATS_METADATA_KEYS = {
+    "connected": "ble_connected",
+    "subscribed": "ble_subscribed",
+    "mtu": "ble_negotiated_mtu",
+    "queued_bytes": "ble_queued_bytes",
+    "dropped_records": "ble_dropped_records",
+    "notifications": "ble_notification_count",
+    "notify_errors": "ble_notify_error_count",
 }
 
 LABEL_COLUMNS = [
@@ -144,9 +161,9 @@ def overdue_streams(now: float, last_seen: dict[str, float], timeout: float | No
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Collect synchronized PPG and optional IMU rows from ESP32 serial output."
+        description="Collect synchronized PPG and optional IMU rows from ESP32 telemetry."
     )
-    parser.add_argument("--port", required=True, help="Serial port, for example COM3")
+    add_transport_arguments(parser, default_baud=115200)
     parser.add_argument("--duration", required=True, type=positive_float, help="Recording duration in seconds")
     parser.add_argument("--required-stream-timeout", type=positive_float, default=None,
                         help="Stop and save an interrupted attempt if either PPG or IMU is absent for this many seconds; off by default")
@@ -178,7 +195,6 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default="",
         help="ADXL345 axis orientation, for example x_distal_y_left_z_outward",
     )
-    parser.add_argument("--baud", type=int, default=115200, help="Serial baud rate, default 115200")
     parser.add_argument("--notes", default="", help="Optional notes saved into metadata")
     parser.add_argument(
         "--systolic-mmhg",
@@ -271,6 +287,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 
 def validate_collection_args(args: argparse.Namespace, parser: argparse.ArgumentParser | None = None) -> argparse.Namespace:
+    validate_transport_arguments(args, parser)
     cuff_time_fields = {
         "cuff_start_time_s": "--cuff-start-time-s",
         "cuff_reading_time_s": "--cuff-reading-time-s",
@@ -562,12 +579,6 @@ def import_dependencies():
     missing = []
 
     try:
-        import serial  # type: ignore
-    except ImportError:
-        serial = None
-        missing.append("pyserial")
-
-    try:
         import pandas as pd  # type: ignore
     except ImportError:
         pd = None
@@ -586,12 +597,12 @@ def import_dependencies():
         print(
             "ERROR: Missing Python package(s): "
             + ", ".join(missing)
-            + "\nInstall them with:\n  python -m pip install pyserial pandas matplotlib",
+            + "\nInstall them with:\n  python -m pip install pandas matplotlib",
             file=sys.stderr,
         )
         raise SystemExit(2)
 
-    return serial, pd, plt
+    return pd, plt
 
 
 def safe_name(value: str) -> str:
@@ -721,6 +732,7 @@ def create_firmware_diagnostics() -> dict:
         "hr_updates": [],
         "latest_motion": {},
         "motion_updates": [],
+        "latest_ble_stats": {},
         "metadata_fields": {},
         "warning_events": [],
     }
@@ -743,6 +755,13 @@ def update_firmware_diagnostics(diagnostics: dict, parsed_status: tuple[str, dic
     if status_type == "imu_stats":
         diagnostics["latest_imu_stats"] = fields
         for status_key, metadata_key in IMU_FIRMWARE_STATS_METADATA_KEYS.items():
+            if status_key in fields:
+                metadata_fields[metadata_key] = fields[status_key]
+        return
+
+    if status_type == "ble_stats":
+        diagnostics["latest_ble_stats"] = fields
+        for status_key, metadata_key in BLE_FIRMWARE_STATS_METADATA_KEYS.items():
             if status_key in fields:
                 metadata_fields[metadata_key] = fields[status_key]
         return
@@ -1376,7 +1395,9 @@ def build_metadata(
     firmware_metadata = {
         metadata_key: firmware_diagnostics["metadata_fields"].get(metadata_key)
         for metadata_key in (
-            list(FIRMWARE_STATS_METADATA_KEYS.values()) + list(IMU_FIRMWARE_STATS_METADATA_KEYS.values())
+            list(FIRMWARE_STATS_METADATA_KEYS.values())
+            + list(IMU_FIRMWARE_STATS_METADATA_KEYS.values())
+            + list(BLE_FIRMWARE_STATS_METADATA_KEYS.values())
         )
     }
     imu_warnings = list(imu_summary["warnings"])
@@ -1424,8 +1445,13 @@ def build_metadata(
         "imu_role": "general_body_arm_motion_quality_flag",
         "imu_local_finger_motion_limitation": True,
         "sensor_timestamp_timebase": "esp_timer_monotonic",
-        "port": args.port,
-        "baud_rate": args.baud,
+        "transport": getattr(args, "transport", "serial"),
+        "transport_device_name": getattr(args, "transport_device_name", None),
+        "transport_device_address": getattr(args, "transport_device_address", None),
+        "transport_service_uuid": getattr(args, "transport_service_uuid", None),
+        "transport_disconnect_count": getattr(args, "transport_disconnect_count", 0),
+        "port": getattr(args, "port", None),
+        "baud_rate": args.baud if getattr(args, "transport", "serial") == "serial" else None,
         "duration_seconds": args.duration,
         "data_duration_seconds": summary["data_duration_s"],
         "recording_start_time": recording_start.isoformat(timespec="seconds"),
@@ -1496,6 +1522,7 @@ def build_metadata(
     metadata.update(firmware_metadata)
     metadata["firmware_latest_stats"] = firmware_diagnostics["latest_stats"] or None
     metadata["imu_firmware_latest_stats"] = firmware_diagnostics["latest_imu_stats"] or None
+    metadata["firmware_latest_ble_stats"] = firmware_diagnostics["latest_ble_stats"] or None
     metadata["firmware_latest_hr"] = firmware_diagnostics["latest_hr"] or None
     metadata["firmware_hr_updates"] = firmware_diagnostics["hr_updates"]
     metadata["firmware_hr_update_count"] = len(firmware_diagnostics["hr_updates"])
@@ -1522,7 +1549,7 @@ def main() -> int:
         print("ERROR: --plot-end must be greater than 0", file=sys.stderr)
         return 1
 
-    serial, pd, plt = import_dependencies()
+    pd, plt = import_dependencies()
     live_viewer = None
     live_bp_viewer = None
     live_bp_context = None
@@ -1613,18 +1640,26 @@ def main() -> int:
     motion_protocol = get_motion_protocol(args.motion_protocol) if args.motion_protocol else None
     motion_protocol_run = MotionProtocolRun(motion_protocol) if motion_protocol else None
 
-    print(f"Opening {args.port} at {args.baud} baud...")
+    transport = getattr(args, "transport", "serial")
+    destination = args.port if transport == "serial" else (args.ble_device or "automatic BLE discovery")
+    print(
+        f"Opening {destination} at {args.baud} baud..."
+        if transport == "serial"
+        else f"Connecting to {destination} over BLE..."
+    )
+    source = create_line_source(args, timeout=1.0, reconnect=False)
     try:
-        with serial.Serial(args.port, args.baud, timeout=1) as ser:
+        with source as ser:
             active_viewer = live_viewer or live_bp_viewer
             if active_viewer is not None:
                 try:
                     ser.set_buffer_size(rx_size=active_viewer.SERIAL_RECEIVE_BUFFER_BYTES)
                 except (AttributeError, NotImplementedError, OSError):
                     pass
-            # Many ESP32 boards reset when the serial port opens. Give boot text time to pass.
-            time.sleep(SERIAL_STARTUP_DELAY_S)
-            ser.reset_input_buffer()
+            # Many ESP32 boards reset when USB serial opens. BLE does not reset the board.
+            if transport == "serial":
+                time.sleep(SERIAL_STARTUP_DELAY_S)
+                ser.reset_input_buffer()
 
             if motion_protocol is not None:
                 print(f"\nMotion-study protocol: {motion_protocol.name}")
@@ -1682,7 +1717,7 @@ def main() -> int:
                             )
                         )
                         live_viewer.clear_and_render(
-                            live_viewer.render_screen(live_state, now, args.port, args.baud, saving=True)
+                            live_viewer.render_screen(live_state, now, ser.display_name, args.baud, saving=True)
                         )
                         next_live_update = now + live_viewer.DEFAULT_REFRESH_SECONDS
                     elif live_bp_viewer is not None and live_state is not None and live_bp_context is not None and now >= next_live_update:
@@ -1694,7 +1729,13 @@ def main() -> int:
                         )
                         live_bp_viewer.clear_and_render(
                             live_bp_viewer.render_screen(
-                                live_state, live_bp_context, now, args.port, args.baud, saving=True
+                                live_state,
+                                live_bp_context,
+                                now,
+                                ser.display_name,
+                                args.baud,
+                                saving=True,
+                                transport=transport,
                             )
                         )
                         next_live_update = now + live_bp_viewer.DEFAULT_REFRESH_SECONDS
@@ -1765,7 +1806,7 @@ def main() -> int:
                         )
                     )
                     live_viewer.clear_and_render(
-                        live_viewer.render_screen(live_state, now, args.port, args.baud, saving=True)
+                        live_viewer.render_screen(live_state, now, ser.display_name, args.baud, saving=True)
                     )
                     next_live_update = now + live_viewer.DEFAULT_REFRESH_SECONDS
                 elif live_bp_viewer is not None and live_state is not None and live_bp_context is not None and now >= next_live_update:
@@ -1777,7 +1818,13 @@ def main() -> int:
                     )
                     live_bp_viewer.clear_and_render(
                         live_bp_viewer.render_screen(
-                            live_state, live_bp_context, now, args.port, args.baud, saving=True
+                            live_state,
+                            live_bp_context,
+                            now,
+                            ser.display_name,
+                            args.baud,
+                            saving=True,
+                            transport=transport,
                         )
                     )
                     next_live_update = now + live_bp_viewer.DEFAULT_REFRESH_SECONDS
@@ -1786,14 +1833,23 @@ def main() -> int:
         interrupted = True
         recording_start = locals().get("recording_start", datetime.now().astimezone())
         print("\nCtrl+C received. Saving collected samples...")
-    except serial.SerialException as exc:
+    except LineTransportDisconnected as exc:
+        interrupted = True
+        recording_start = locals().get("recording_start", datetime.now().astimezone())
+        print(f"\nERROR: {exc}. Stopping early and saving this incomplete attempt.", file=sys.stderr)
+    except LineTransportError as exc:
         print(
-            f"ERROR: Could not open or read from serial port {args.port} at {args.baud} baud.\n"
-            f"Details: {exc}\n"
-            "Close ESP-IDF monitor or any other app using the COM port, then try again.",
+            f"ERROR: Could not open or read from {transport} device {destination}.\n"
+            f"Details: {exc}\nCheck that the device is powered and not in use by another program.",
             file=sys.stderr,
         )
         return 1
+
+    transport_metadata = source.metadata
+    args.transport_device_name = transport_metadata.device_name
+    args.transport_device_address = transport_metadata.device_address
+    args.transport_service_uuid = transport_metadata.service_uuid
+    args.transport_disconnect_count = transport_metadata.disconnect_count
 
     df = pd.DataFrame(rows, columns=["sample_seq", "timestamp_ms", "red", "ir"])
     imu_df = pd.DataFrame(imu_rows, columns=["imu_seq", "timestamp_ms", "x_raw", "y_raw", "z_raw"])

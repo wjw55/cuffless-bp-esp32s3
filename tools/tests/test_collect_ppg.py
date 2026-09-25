@@ -168,6 +168,22 @@ class FirmwareStatusParsingTests(unittest.TestCase):
         self.assertIsNone(parse_ppg_row(motion_line))
         self.assertIsNone(parse_imu_row(motion_line))
 
+    def test_tracks_ble_health_stats_without_treating_them_as_raw_data(self):
+        diagnostics = create_firmware_diagnostics()
+        ble_line = (
+            "# ble_stats connected=true subscribed=true mtu=247 queued_bytes=48 "
+            "dropped_records=0 notifications=501 notify_errors=0"
+        )
+
+        update_firmware_diagnostics(diagnostics, parse_firmware_status_line(ble_line))
+
+        self.assertEqual(diagnostics["latest_ble_stats"]["mtu"], 247)
+        self.assertEqual(diagnostics["metadata_fields"]["ble_dropped_records"], 0)
+        self.assertEqual(diagnostics["metadata_fields"]["ble_notification_count"], 501)
+        self.assertEqual(diagnostics["metadata_fields"]["ble_notify_error_count"], 0)
+        self.assertIsNone(parse_ppg_row(ble_line))
+        self.assertIsNone(parse_imu_row(ble_line))
+
 
 def make_args(**overrides):
     defaults = {
@@ -183,6 +199,13 @@ def make_args(**overrides):
         "led_current_ma": 7.2,
         "cuff_arm": "left",
         "ppg_hand": "right",
+        "transport": "serial",
+        "ble_device": None,
+        "ble_scan_timeout": 10.0,
+        "transport_device_name": "COM3",
+        "transport_device_address": None,
+        "transport_service_uuid": None,
+        "transport_disconnect_count": 0,
         "port": "COM3",
         "baud": 115200,
         "duration": 90.0,
@@ -309,6 +332,40 @@ class MetadataTests(unittest.TestCase):
         self.assertIsNone(metadata["cuff_start_time_s"])
         self.assertIsNone(metadata["cuff_reading_time_s"])
         self.assertEqual(metadata["notes"], "Stable PPG-only check")
+
+    def test_metadata_records_ble_transport_without_changing_signal_fields(self):
+        diagnostics = create_firmware_diagnostics()
+        update_firmware_diagnostics(
+            diagnostics,
+            parse_firmware_status_line(
+                "# ble_stats connected=true subscribed=true mtu=247 queued_bytes=0 "
+                "dropped_records=0 notifications=100 notify_errors=0"
+            ),
+        )
+        metadata = build_metadata(
+            make_args(
+                transport="ble",
+                port=None,
+                transport_device_name="PPG-LOGGER-A1B2C3",
+                transport_device_address="AA:BB:CC:DD:EE:FF",
+                transport_service_uuid="9f5c0001-6f5a-4b7d-9a21-3d4e5f607182",
+            ),
+            make_summary(),
+            datetime(2026, 6, 7, 20, 0, tzinfo=timezone.utc),
+            interrupted=False,
+            ignored_lines=0,
+            zoom_start_s=0.0,
+            zoom_end_s=10.0,
+            firmware_diagnostics=diagnostics,
+        )
+
+        self.assertEqual(metadata["transport"], "ble")
+        self.assertEqual(metadata["transport_device_name"], "PPG-LOGGER-A1B2C3")
+        self.assertEqual(metadata["transport_device_address"], "AA:BB:CC:DD:EE:FF")
+        self.assertIsNone(metadata["port"])
+        self.assertIsNone(metadata["baud_rate"])
+        self.assertEqual(metadata["ble_negotiated_mtu"], 247)
+        self.assertEqual(metadata["ble_dropped_records"], 0)
 
     def test_metadata_includes_output_csv_path_when_available(self):
         csv_path = Path("data/raw/test_omron_pilot_001_omron_001_ppg.csv")
@@ -564,6 +621,24 @@ class MetadataTests(unittest.TestCase):
         self.assertEqual(args.cuff_hr_bpm, 72)
         self.assertEqual(args.cuff_start_time_s, 25.0)
         self.assertEqual(args.cuff_reading_time_s, 55.0)
+
+    def test_cli_accepts_ble_without_serial_port(self):
+        args = parse_args([
+            "--transport",
+            "ble",
+            "--ble-device",
+            "PPG-LOGGER-A1B2C3",
+            "--duration",
+            "90",
+            "--subject",
+            "P001",
+            "--session",
+            "ble_validation",
+        ])
+
+        self.assertEqual(args.transport, "ble")
+        self.assertEqual(args.ble_device, "PPG-LOGGER-A1B2C3")
+        self.assertIsNone(args.port)
 
     def test_prompt_bp_after_blank_inputs_keep_existing_values(self):
         args = make_args(
