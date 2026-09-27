@@ -406,6 +406,10 @@ def reset_buffer(state: BPViewerState, status: str, reason: str) -> None:
     state.motion_updates.clear()
     state.last_analysis_at = None
     state.last_analysis_sensor_ms = None
+    if status in {"invalid_timing", "analysis_stale"}:
+        # A prior estimate cannot be held across sensor-health, continuity, or
+        # transport failures, even after the next clean buffer starts warming.
+        state.last_validated_bp = None
     state.result = BPInferenceResult(status, reason)
 
 
@@ -648,6 +652,10 @@ def maybe_predict(
 
 
 def effective_result(state: BPViewerState, now: float) -> BPInferenceResult:
+    # A disconnected transport must hide a held estimate immediately, even if
+    # the last motion update still says Moving and has not yet become stale.
+    if not state.transport_connected:
+        return BPInferenceResult("analysis_stale", "sensor transport disconnected")
     gate, reason = motion_gate(state, now)
     if gate:
         return BPInferenceResult(gate, str(reason))
@@ -987,6 +995,7 @@ def run_viewer(
                 connected = source.connected
                 if not connected and state.transport_connected:
                     state.transport_connected = False
+                    state.last_validated_bp = None
                     reset_buffer(
                         state,
                         "analysis_stale",

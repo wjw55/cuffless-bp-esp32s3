@@ -18,6 +18,7 @@ The scripts kept directly in `tools/` are stable command-line entry points. Shar
 | `view_live_hr.py` | Firmware live-HR terminal display, primarily for the finger profile. |
 | `view_live_upper_arm_hr.py` | PC rolling upper-arm HR preview. |
 | `view_live_bp.py` | Experimental PC rolling BP preview over USB serial or BLE, with safe model gating and an opt-in 30-second development policy. |
+| `view_live_bp_desktop.py` | Display-only Windows BP window with USB/BLE setup, waveform, motion, health and the same inference gates as the terminal viewer. |
 
 ## Motion and signal quality
 

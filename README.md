@@ -506,6 +506,23 @@ This is source-domain research only. It can guide the local recovery experiment 
 
 ## Experimental PC BP Viewer
 
+For a more readable local window, run:
+
+```powershell
+& "C:\wjw\Anaconda\python.exe" tools\view_live_bp_desktop.py
+```
+
+Choose USB serial or BLE and a device in the window. Enter the participant ID,
+then either select a saved model directory or choose pending mode and enter the
+calibration SBP/DBP. The window shows current versus last-validated BP, estimate
+age, clean-buffer progress, motion, a 15-second raw-IR trace, sensor health and
+warnings. **Advanced / experimental** options expose the same opt-in 30-second
+policy and unvalidated-model override as the terminal viewer. Both are off by
+default. The window does not save recordings; use `collect_ppg.py` for study
+data. Only one program can use the COM port or BLE connection at a time, so stop
+the viewer before starting the collector. Tkinter and Matplotlib are required;
+BLE additionally requires `requirements-ble.txt`.
+
 The BP viewer is ready to run in safe pending mode before a model exists. It shows calibration, motion, signal quality, sensor health, and clean-buffer progress, but always keeps BP at `--/--`:
 
 ```powershell
