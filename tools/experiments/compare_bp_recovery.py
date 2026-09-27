@@ -8,10 +8,13 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import sys
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from bp_core.datasets import _discover_local
 from bp_core.features import _contact_masks, estimate_sample_rate, recording_quality_reasons

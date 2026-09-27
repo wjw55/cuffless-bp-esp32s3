@@ -3,11 +3,14 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 from pathlib import Path
 
 import pandas as pd
 
-from motion_bp import ROOT, audit, chronological_split, evaluate_ablation, extract_recording, load_config, sha256
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from experiments.motion_bp import ROOT, audit, chronological_split, evaluate_ablation, extract_recording, load_config, sha256
 
 
 def write_json(path: Path, value: dict) -> None:

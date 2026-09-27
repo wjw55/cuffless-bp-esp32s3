@@ -99,7 +99,7 @@ The display-only command `python tools\view_live_hr.py --port COM3` is for demon
 
 ## Controlled Motion Calibration
 
-Keep the finger PPG setup unchanged and record three 90-second trials. In each trial follow: 0-20 s still, 20-30 s gentle arm movement, 30-45 s still, 45-55 s larger movement, 55-70 s still, 70-80 s deliberate sensor disturbance, and 80-90 s still. Run `tools/calibrate_motion.py` on the three IMU CSV files. The tool uses a causal 100-sample RMS window and ignores guarded transition/recovery margins. Configure firmware only when at least 95% of guarded stationary time is classified still and at least 90% of guarded movement blocks are detected. Keep BPM suppression disabled regardless of the calibration result.
+Keep the finger PPG setup unchanged and record three 90-second trials. In each trial follow: 0-20 s still, 20-30 s gentle arm movement, 30-45 s still, 45-55 s larger movement, 55-70 s still, 70-80 s deliberate sensor disturbance, and 80-90 s still. Run `tools/experiments/calibrate_motion.py` on the three IMU CSV files. The tool uses a causal 100-sample RMS window and ignores guarded transition/recovery margins. Configure firmware only when at least 95% of guarded stationary time is classified still and at least 90% of guarded movement blocks are detected. Keep BPM suppression disabled regardless of the calibration result.
 
 ## Upper-Arm Motion-Quality Study
 

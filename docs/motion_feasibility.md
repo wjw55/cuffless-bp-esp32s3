@@ -34,7 +34,7 @@ The seated pilot's host-to-device cue mapping had approximately 10.5 ms spread
 From the project directory:
 
 ```powershell
-python tools/motion_feasibility.py --metadata data/raw/P001_movement_pilot_20260912_seated_001_metadata.json --activities data/processed/motion_bp_v1/seated_pilot_20260912/guarded_activity_intervals.csv --model-package data/processed/motion_quality_v1/stage1/classifier_v1/motion_quality_classifier.joblib --output-dir data/processed/motion_feasibility_v1/seated_pilot
+python tools/experiments/motion_feasibility.py --metadata data/raw/P001_movement_pilot_20260912_seated_001_metadata.json --activities data/processed/motion_bp_v1/seated_pilot_20260912/guarded_activity_intervals.csv --model-package data/processed/motion_quality_v1/stage1/classifier_v1/motion_quality_classifier.joblib --output-dir data/processed/motion_feasibility_v1/seated_pilot
 ```
 
 Only load trusted local model packages. Outputs stay in ignored `data/processed`:
@@ -127,7 +127,7 @@ do not create a motion-BP viewer or claim motion-compensated BP accuracy here.
 
 ## Essential changes
 
-- `tools/motion_feasibility.py`: one offline report using existing features.
+- `tools/experiments/motion_feasibility.py`: one offline report using existing features.
 - `tools/tests/test_motion_feasibility.py`: time accounting, guards and review tests.
 - This note: inventory, interpretation and short collection protocol.
 

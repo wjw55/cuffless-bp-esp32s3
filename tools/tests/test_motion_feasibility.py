@@ -7,7 +7,7 @@ import pandas as pd
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from motion_feasibility import attach_reviews, contained, review_errors, summarize, union_ms
+from experiments.motion_feasibility import attach_reviews, contained, review_errors, summarize, union_ms
 
 
 def windows():

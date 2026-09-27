@@ -33,7 +33,7 @@ Expand-Archive data\external\graphene_bp_v1.0.0.zip `
 Audit pairing and participant discovery:
 
 ```powershell
-& "C:\wjw\Anaconda\python.exe" tools\graphene_ppg_bp.py audit `
+& "C:\wjw\Anaconda\python.exe" tools\experiments\graphene_ppg_bp.py audit `
   --config config\graphene_ppg_bp_v1.json `
   --output-dir data\processed\graphene_ppg_bp\audit_001
 ```
@@ -41,7 +41,7 @@ Audit pairing and participant discovery:
 Run the experiment:
 
 ```powershell
-& "C:\wjw\Anaconda\python.exe" tools\graphene_ppg_bp.py run `
+& "C:\wjw\Anaconda\python.exe" tools\experiments\graphene_ppg_bp.py run `
   --config config\graphene_ppg_bp_v1.json `
   --output-dir data\processed\graphene_ppg_bp\run_001
 ```

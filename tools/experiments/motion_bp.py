@@ -22,7 +22,7 @@ from motion_quality import (_causal_imu, classify_motion_intensity,
                             load_config as load_motion_quality_config,
                             motion_intensity_settings)
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[2]
 PPG_COLUMNS = ["sample_seq", "timestamp_ms", "red", "ir"]
 IMU_COLUMNS = ["imu_seq", "timestamp_ms", "x_raw", "y_raw", "z_raw"]
 STATES = ("Stable estimate", "Motion-compensated estimate", "Low confidence",

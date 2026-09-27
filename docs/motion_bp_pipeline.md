@@ -35,8 +35,8 @@ live output or provide BP labels.
 Run from the repository root:
 
 ```powershell
-& C:\wjw\Anaconda\python.exe tools\motion_bp_pipeline.py audit --output-dir data/processed/motion_bp_v1/audit_001
-& C:\wjw\Anaconda\python.exe tools\motion_bp_pipeline.py extract --output-dir data/processed/motion_bp_v1/features_001
+& C:\wjw\Anaconda\python.exe tools\experiments\motion_bp_pipeline.py audit --output-dir data/processed/motion_bp_v1/audit_001
+& C:\wjw\Anaconda\python.exe tools\experiments\motion_bp_pipeline.py extract --output-dir data/processed/motion_bp_v1/features_001
 ```
 
 Supply `--identities data/processed/motion_bp_v1/identities.json` when a human has
@@ -146,13 +146,13 @@ data; collect a new locked test. If tuning is later added, use forward-only fold
 inside the fit partition. Freeze thresholds and feature choices before testing.
 
 ```powershell
-& C:\wjw\Anaconda\python.exe tools\motion_bp_pipeline.py split `
+& C:\wjw\Anaconda\python.exe tools\experiments\motion_bp_pipeline.py split `
   --windows data/processed/motion_bp_v1/reviewed_reference_windows.csv `
   --output-dir data/processed/motion_bp_v1/split_001
 ```
 
 ```powershell
-& C:\wjw\Anaconda\python.exe tools\motion_bp_pipeline.py evaluate `
+& C:\wjw\Anaconda\python.exe tools\experiments\motion_bp_pipeline.py evaluate `
   --train data/processed/motion_bp_v1/train.csv `
   --uncertainty data/processed/motion_bp_v1/uncertainty.csv `
   --test data/processed/motion_bp_v1/test.csv `

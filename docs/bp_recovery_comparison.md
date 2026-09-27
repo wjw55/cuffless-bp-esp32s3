@@ -3,7 +3,7 @@
 Run from the `ppg_logger` directory:
 
 ```powershell
-& 'C:\wjw\Anaconda\python.exe' tools\compare_bp_recovery.py
+& 'C:\wjw\Anaconda\python.exe' tools\experiments\compare_bp_recovery.py
 ```
 
 This reads existing P001 cuff-labelled upper-arm recordings and the timestamp-

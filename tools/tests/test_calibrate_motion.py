@@ -8,7 +8,7 @@ from tempfile import TemporaryDirectory
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from calibrate_motion import (
+from experiments.calibrate_motion import (
     CLEAN_STILL_INTERVALS,
     MOVEMENT_INTERVALS,
     acceptance_gates,

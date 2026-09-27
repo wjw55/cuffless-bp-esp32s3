@@ -1,6 +1,8 @@
 # Tool catalogue
 
-The scripts kept directly in `tools/` are stable command-line entry points. Shared BP implementation lives in `bp_core/`, and all regression tests live in `tests/`.
+The scripts kept directly in `tools/` are current command-line entry points. Completed, reproducible research experiments live in `experiments/`. Shared BP implementation lives in `bp_core/`, and all regression tests live in `tests/`.
+
+For the current team workflow, focus on `collect_ppg.py` for recording, `analyze_trials.py` for signal/HR review, `evaluate_bp_feasibility_models.py` for offline BP feasibility evaluation, and `view_live_bp_desktop.py` for the display-only live preview. The viewer does not collect or save study data.
 
 ## Acquisition and trial analysis
 
@@ -24,7 +26,6 @@ The scripts kept directly in `tools/` are stable command-line entry points. Shar
 
 | Tool | Purpose |
 | --- | --- |
-| `calibrate_motion.py` | Calibrate the original still/moving RMS threshold. |
 | `motion_study_protocol.py` | Define and validate prompted motion-study schedules. |
 | `prepare_motion_quality.py` | Prepare and finalize manually reviewed motion-quality windows. |
 | `train_motion_quality.py` | Train the usable/unusable classifier. |
@@ -39,15 +40,22 @@ The scripts kept directly in `tools/` are stable command-line entry points. Shar
 | --- | --- |
 | `bp_pipeline.py` | Main stationary personalized PPG-to-BP pipeline. |
 | `bp_core/` | Shared dataset, feature, model, inference and reporting modules. |
-| `compare_bp_recovery.py` | Compare shorter post-motion recovery windows with the stationary policy. |
 | `evaluate_bp_feasibility.py` | Compare the unchanged strict BP gate with the gap-tolerant school-project feasibility gate. |
 | `evaluate_bp_feasibility_models.py` | Run evaluation-only participant-held-out personalized BP models from frozen feasibility occasion features. |
-| `motion_bp_pipeline.py` | Run the PPG-only versus PPG+IMU motion-band experiment. |
-| `motion_bp.py` | Shared motion-aware BP experiment implementation. |
-| `motion_feasibility.py` | Review whether PPG remains usable across motion categories. |
-| `graphene_ppg_bp.py` | Separate public fingertip PPG/Finapres short-window experiment. |
 
-The BP research tools are not interchangeable: `bp_pipeline.py` remains the main upper-arm stationary path, while the recovery, motion and Graphene tools are isolated experiments.
+`bp_pipeline.py` remains the main upper-arm stationary path. The active feasibility evaluators do not change the live BP algorithm.
+
+## Archived experiments
+
+These five completed experiments remain runnable for reproducing earlier findings; invoke them from the project root using their `tools/experiments/` paths.
+
+| Tool | Purpose |
+| --- | --- |
+| `experiments/calibrate_motion.py` | Original still/moving RMS threshold calibration. |
+| `experiments/compare_bp_recovery.py` | Shorter post-motion recovery-window comparison. |
+| `experiments/graphene_ppg_bp.py` | Public fingertip PPG/Finapres short-window experiment. |
+| `experiments/motion_bp_pipeline.py` and `experiments/motion_bp.py` | PPG-only versus PPG+IMU motion-band experiment and its shared implementation. |
+| `experiments/motion_feasibility.py` | Offline review of PPG usability across motion categories. |
 
 ## Tests
 

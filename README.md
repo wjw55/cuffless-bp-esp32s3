@@ -197,7 +197,7 @@ With the finger PPG and the IMU in its documented location, collect three 90-sec
 Use distinct trial IDs, for example `motion_001`, `motion_002`, and `motion_003`, then calibrate them:
 
 ```powershell
-python tools\calibrate_motion.py "data\raw\test_motion_calibration_motion_*_imu.csv" --output data\processed\motion_calibration.json
+python tools\experiments\calibrate_motion.py "data\raw\test_motion_calibration_motion_*_imu.csv" --output data\processed\motion_calibration.json
 ```
 
 The tool and firmware use the same causal gravity removal and one-second (100-sample) rolling RMS activity calculation. Calibration excludes transition and recovery margins, then searches integer milli-g thresholds from lowest to highest. A threshold is accepted only when at least 95% of guarded stationary time is classified still and at least 90% of the guarded movement blocks are detected. Detection may occur anywhere inside a movement block; it is no longer required within 0.5 seconds of a manually timed cue. Do not configure a threshold after a failed result.
@@ -286,7 +286,7 @@ Both commands save per-band balanced accuracy, usable recall, unusable recall, a
 
 ### PPG-only versus PPG+IMU BP comparison (Stage 2)
 
-The separate `tools\motion_bp_pipeline.py` path now uses the same Stage 1 motion bands and compares fixed Ridge regressors using PPG-only, PPG plus motion intensity, and PPG plus the full IMU/cross-modal feature set. It reports SBP/DBP error on identical commonly accepted windows and accepted unique-time coverage for every band. Severe-motion windows always remain unavailable. See [the motion-aware BP protocol](docs/motion_bp_pipeline.md) for audit, extraction, split and evaluation commands.
+The separate `tools\experiments\motion_bp_pipeline.py` path now uses the same Stage 1 motion bands and compares fixed Ridge regressors using PPG-only, PPG plus motion intensity, and PPG plus the full IMU/cross-modal feature set. It reports SBP/DBP error on identical commonly accepted windows and accepted unique-time coverage for every band. Severe-motion windows always remain unavailable. See [the motion-aware BP protocol](docs/motion_bp_pipeline.md) for audit, extraction, split and evaluation commands.
 
 This is software readiness, not a motion-BP result. The current Omron-after-recording labels cannot truthfully label individual movement windows, so numeric comparison requires synchronized, independently reviewed continuous BP reference data. The firmware, stationary model and live viewers remain unchanged.
 
@@ -353,7 +353,7 @@ The axes are signed raw readings converted during analysis using approximately `
 
 The motion plot contains PPG, acceleration magnitude, gravity-removed dynamic acceleration, and exploratory motion candidates. Its threshold is calculated independently for each recording as the median plus six scaled median absolute deviations. Validate these flags with labelled motion periods before using them to reject data.
 
-The exploratory plot threshold is separate from the causal firmware threshold produced by `calibrate_motion.py`.
+The exploratory plot threshold is separate from the causal firmware threshold produced by `tools/experiments/calibrate_motion.py`.
 
 ## IMU Validation Order
 
@@ -493,11 +493,11 @@ See [docs/bp_pipeline.md](docs/bp_pipeline.md) for dataset locations, outputs, r
 A separate Graphene adapter compares 20-, 30-, 60- and approximately 85-second PPG morphology observations against synchronized Finapres BP. It uses only fingertip PPG and Finapres channels—never ECG, Bio-Z, PAT or PTT—and does not produce a viewer model:
 
 ```powershell
-& "C:\wjw\Anaconda\python.exe" tools\graphene_ppg_bp.py audit `
+& "C:\wjw\Anaconda\python.exe" tools\experiments\graphene_ppg_bp.py audit `
   --config config\graphene_ppg_bp_v1.json `
   --output-dir data\processed\graphene_ppg_bp\audit_001
 
-& "C:\wjw\Anaconda\python.exe" tools\graphene_ppg_bp.py run `
+& "C:\wjw\Anaconda\python.exe" tools\experiments\graphene_ppg_bp.py run `
   --config config\graphene_ppg_bp_v1.json `
   --output-dir data\processed\graphene_ppg_bp\run_001
 ```

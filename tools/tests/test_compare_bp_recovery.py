@@ -8,7 +8,7 @@ import numpy as np
 import pandas as pd
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-import compare_bp_recovery as recovery
+from experiments import compare_bp_recovery as recovery
 from bp_core.inference import BPModelBundle, BPInferenceResult, extract_current_features
 from test_bp_pipeline import minimal_config
 

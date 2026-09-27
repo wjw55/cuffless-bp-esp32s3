@@ -10,7 +10,7 @@ import pandas as pd
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from graphene_ppg_bp import (
+from experiments.graphene_ppg_bp import (
     build_personalized_examples,
     discover_trials,
     extract_finapres_reference,

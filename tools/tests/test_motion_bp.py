@@ -10,7 +10,7 @@ import pandas as pd
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from motion_bp import (ROOT, ablation_comparison, accepted_unique_seconds, audit,
+from experiments.motion_bp import (ROOT, ablation_comparison, accepted_unique_seconds, audit,
                        assert_split, attach_motion_band_features, coverage,
                        evaluate_ablation, extract_recording, feature_sets,
                        interval_union, load_config, metrics, movement_duration,

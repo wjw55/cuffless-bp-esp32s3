@@ -1,15 +1,18 @@
 """Offline signal feasibility only. Never fits a model or produces BP estimates."""
 import argparse
 import json
+import sys
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
 
-from motion_bp import extract_recording, load_config, quality_decision
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from experiments.motion_bp import extract_recording, load_config, quality_decision
 from upper_arm_hr import build_contact_masks
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[2]
 LABELS = {"clean", "motion_corrupted", "contact_corrupted", "uncertain"}
 
 
