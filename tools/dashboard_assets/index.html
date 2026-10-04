@@ -1,0 +1,123 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Experimental Upper-Arm BP Dashboard</title>
+  <link rel="stylesheet" href="/assets/styles.css">
+</head>
+<body>
+  <header class="topbar">
+    <div>
+      <p class="eyebrow">UPPER-ARM PPG RESEARCH PROTOTYPE</p>
+      <h1>Blood Pressure Dashboard</h1>
+    </div>
+    <div class="connection-summary">
+      <span id="connection-dot" class="status-dot idle" aria-hidden="true"></span>
+      <div><strong id="connection-title">Not connected</strong><span id="connection-detail">Choose a device below</span></div>
+    </div>
+  </header>
+
+  <main>
+    <section id="setup-panel" class="panel setup-panel">
+      <div class="section-heading">
+        <div><p class="step">SETUP</p><h2>Connect the wearable</h2></div>
+        <p>Only one viewer or collector can use the device at a time.</p>
+      </div>
+      <div class="setup-grid">
+        <label>Transport
+          <select id="transport"><option value="serial">USB serial</option><option value="ble">Bluetooth LE</option></select>
+        </label>
+        <label>Device
+          <span class="inline-control"><select id="device"></select><button id="scan" class="secondary" type="button">Refresh</button></span>
+        </label>
+        <label>Participant ID
+          <input id="participant" value="P001" maxlength="32" autocomplete="off">
+        </label>
+        <fieldset class="mode-choice">
+          <legend>Prediction mode</legend>
+          <label><input type="radio" name="mode" value="model" checked> Saved model</label>
+          <label><input type="radio" name="mode" value="pending"> Pending / no model</label>
+        </fieldset>
+      </div>
+
+      <div id="model-settings" class="mode-settings">
+        <label>Model package
+          <span class="inline-control"><select id="model"></select><button id="find-models" class="secondary" type="button">Find models</button></span>
+        </label>
+        <label>Or enter model directory
+          <input id="model-path" placeholder="C:\...\single_subject\P001">
+        </label>
+      </div>
+      <div id="pending-settings" class="mode-settings hidden">
+        <label>Calibration SBP <input id="calibration-sbp" type="number" min="1" placeholder="116"></label>
+        <label>Calibration DBP <input id="calibration-dbp" type="number" min="1" placeholder="72"></label>
+        <p>Pending mode verifies the display and sensors but never shows a numeric BP.</p>
+      </div>
+
+      <details class="advanced">
+        <summary>Advanced / experimental</summary>
+        <label><input id="fast-window" type="checkbox"> Enable experimental 30-second policy</label>
+        <label><input id="allow-unvalidated" type="checkbox"> Show an unvalidated development estimate</label>
+        <p class="warning-copy">These settings do not validate the model. Any displayed estimate remains research-only.</p>
+      </details>
+      <div id="setup-message" class="message" role="status"></div>
+      <div class="actions"><button id="connect" class="primary" type="button">Connect</button><button id="stop" class="secondary" type="button" disabled>Stop</button></div>
+    </section>
+
+    <section class="dashboard-grid">
+      <article id="bp-card" class="panel bp-card unavailable">
+        <div class="card-header"><span>EXPERIMENTAL BP</span><span id="bp-mode" class="pill">Unavailable</span></div>
+        <div class="bp-value"><strong id="sbp">--</strong><span>/</span><strong id="dbp">--</strong><small>mmHg</small></div>
+        <p id="bp-age" class="age">No validated estimate</p>
+        <h3 id="bp-status">Waiting for connection</h3>
+        <p id="bp-reason" class="muted">Connect the wearable to begin.</p>
+        <div id="experimental-warning" class="alert hidden"></div>
+      </article>
+
+      <article class="panel quality-card">
+        <div class="card-header"><span>SIGNAL QUALITY</span><span id="quality-state" class="pill">Waiting</span></div>
+        <div class="progress-label"><strong id="buffer-label">0 / 85 s</strong><span>clean buffer</span></div>
+        <div class="progress-track"><div id="buffer-progress" class="progress-fill"></div></div>
+        <div class="metrics two"><div><span>Accepted windows</span><strong id="accepted-windows">--</strong></div><div><span>Clean coverage</span><strong id="clean-coverage">--</strong></div></div>
+        <div class="metrics one"><div><span>PPG pulse rate</span><strong id="pulse-rate">-- BPM</strong></div></div>
+      </article>
+
+      <article class="panel motion-card">
+        <div class="card-header"><span>MOTION</span><span id="motion-state" class="pill">Waiting</span></div>
+        <div id="motion-icon" class="motion-icon" aria-hidden="true">○</div>
+        <h3 id="motion-intensity">Unknown intensity</h3>
+        <p id="motion-value" class="muted">Activity unavailable</p>
+        <p id="motion-guidance">Remain still while a clean measurement window is collected.</p>
+      </article>
+
+      <article class="panel chart-card waveform-card">
+        <div class="card-header"><span>LIVE PPG</span><span>Last 15 seconds · baseline removed</span></div>
+        <canvas id="waveform" height="220" aria-label="Live PPG waveform"></canvas>
+        <p id="waveform-empty" class="chart-empty">Waiting for PPG samples</p>
+      </article>
+
+      <article class="panel chart-card history-card">
+        <div class="card-header"><span>SESSION BP HISTORY</span><button id="reset-history" class="text-button" type="button">Clear</button></div>
+        <canvas id="history" height="250" aria-label="Accepted blood pressure history"></canvas>
+        <p id="history-empty" class="chart-empty">New accepted estimates will appear as points. Held values are not repeated.</p>
+        <div class="legend"><span><i class="sbp"></i>SBP</span><span><i class="dbp"></i>DBP</span></div>
+        <ol id="history-points" class="history-points"></ol>
+      </article>
+    </section>
+
+    <details class="panel technical">
+      <summary>Technical health and model details</summary>
+      <div class="technical-grid">
+        <div><h3>Session</h3><dl id="session-details"></dl></div>
+        <div><h3>Sensor health</h3><dl id="sensor-health"></dl></div>
+        <div><h3>BLE telemetry</h3><dl id="ble-health"></dl></div>
+        <div><h3>Recent warnings</h3><ul id="warnings"><li>None</li></ul></div>
+      </div>
+    </details>
+  </main>
+
+  <footer><strong>Research feasibility only.</strong> This dashboard is not a medical BP measurement and does not save study recordings.</footer>
+  <script src="/assets/dashboard.js"></script>
+</body>
+</html>

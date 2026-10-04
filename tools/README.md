@@ -2,7 +2,7 @@
 
 The scripts kept directly in `tools/` are current command-line entry points. Completed, reproducible research experiments live in `experiments/`. Shared BP implementation lives in `bp_core/`, and all regression tests live in `tests/`.
 
-For the current team workflow, focus on `collect_ppg.py` for recording, `analyze_trials.py` for signal/HR review, `evaluate_bp_feasibility_models.py` for offline BP feasibility evaluation, and `view_live_bp_desktop.py` for the display-only live preview. The viewer does not collect or save study data.
+For the current team workflow, focus on `collect_ppg.py` for recording, `analyze_trials.py` for signal/HR review, `evaluate_bp_feasibility_models.py` for offline BP feasibility evaluation, and `view_live_bp_dashboard.py` for the display-only live preview. The viewers do not collect or save study data.
 
 ## Acquisition and trial analysis
 
@@ -21,6 +21,8 @@ For the current team workflow, focus on `collect_ppg.py` for recording, `analyze
 | `view_live_upper_arm_hr.py` | PC rolling upper-arm HR preview. |
 | `view_live_bp.py` | Experimental PC rolling BP preview over USB serial or BLE, with safe model gating and an opt-in 30-second development policy. |
 | `view_live_bp_desktop.py` | Display-only Windows BP window with USB/BLE setup, waveform, motion, health and the same inference gates as the terminal viewer. |
+| `view_live_bp_dashboard.py` | Localhost browser dashboard with USB/BLE setup, current/held BP, clean-window progress, waveform, session-only history and technical health. |
+| `live_bp_presentation.py` | Shared immutable presentation snapshots and background worker used by the desktop and browser viewers. |
 
 ## Motion and signal quality
 

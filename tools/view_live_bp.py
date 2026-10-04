@@ -236,6 +236,7 @@ class BPViewerState:
     latest_motion: dict = field(default_factory=dict)
     ppg_stats: dict = field(default_factory=dict)
     imu_stats: dict = field(default_factory=dict)
+    ble_stats: dict = field(default_factory=dict)
     ppg_samples: deque[tuple[int, int, int, int]] = field(default_factory=deque)
     motion_updates: deque[dict] = field(default_factory=deque)
     warnings: deque[str] = field(default_factory=lambda: deque(maxlen=MAX_RECENT_WARNINGS))
@@ -500,6 +501,9 @@ def update_state_from_line(state: BPViewerState, line: str, now: float) -> bool:
             or _counter(fields, "fifo_overflows") > _counter(previous, "fifo_overflows")
         ):
             reset_buffer(state, "invalid_timing", "IMU health counter reported an error")
+        return True
+    if kind == "ble_stats":
+        state.ble_stats = fields
         return True
     if kind == "warning":
         state.warnings.append(format_warning(fields))

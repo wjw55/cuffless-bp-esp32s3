@@ -506,7 +506,33 @@ This is source-domain research only. It can guide the local recovery experiment 
 
 ## Experimental PC BP Viewer
 
-For a more readable local window, run:
+For the clearest local demonstration, install the dashboard dependency and run
+the localhost browser dashboard:
+
+```powershell
+& "C:\wjw\Anaconda\python.exe" -m pip install -r requirements-dashboard.txt
+& "C:\wjw\Anaconda\python.exe" tools\view_live_bp_dashboard.py
+```
+
+It opens `http://127.0.0.1:8765` and never sends data outside the laptop. The
+browser setup screen supports USB serial and BLE, discovers local model packages
+for an anonymous participant ID, and also supports safe pending mode. It shows
+current versus last-validated BP, estimate age, clean-window progress, motion,
+the latest 15 seconds of baseline-removed IR, accepted BP points from the current
+session, and a collapsible sensor-health panel. History exists in memory only,
+is cleared when the connection, participant or model changes, and never treats a
+held value as a new measurement. Use `--port PORT` to select another local port
+or `--no-browser` to suppress automatic browser opening.
+
+The dashboard uses the same BP inference, motion gate, stale-data handling and
+last-validated rules as the terminal and Tkinter viewers. Pending mode and model
+mismatches never display a number. The unvalidated-model override and 30-second
+policy remain off by default under **Advanced / experimental** and are prominently
+labelled when enabled. The dashboard is display-only: use `collect_ppg.py` for
+every study recording, and stop the dashboard before another program accesses
+the same COM port or BLE device.
+
+The original Tkinter window remains available as a fallback:
 
 ```powershell
 & "C:\wjw\Anaconda\python.exe" tools\view_live_bp_desktop.py

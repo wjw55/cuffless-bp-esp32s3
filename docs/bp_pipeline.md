@@ -77,6 +77,13 @@ The previously examined P001 result under `data/processed/bp/20260904T180300` is
 
 ## Experimental BP prediction and viewer
 
+For a display-only browser interface, install `requirements-dashboard.txt` and
+run `tools\view_live_bp_dashboard.py`. The server binds only to
+`http://127.0.0.1:8765`, uses the same inference and safety decisions described
+below, and keeps its accepted-point history in memory only. It does not replace
+the collector and does not write raw signals, labels, estimates or identifiers
+to disk. Only one collector or viewer may own the USB/BLE device at a time.
+
 Check one saved upper-arm recording with the same feature extraction and model package used during training:
 
 ```powershell
