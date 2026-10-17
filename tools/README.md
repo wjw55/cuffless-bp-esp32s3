@@ -1,8 +1,26 @@
 # Tool catalogue
 
-The scripts kept directly in `tools/` are current command-line entry points. Completed, reproducible research experiments live in `experiments/`. Shared BP implementation lives in `bp_core/`, and all regression tests live in `tests/`.
+`tools/` contains supported command-line entry points **and shared implementation modules**. A file imported by the collector or dashboard is not an unused tool. Completed, reproducible research experiments live in `experiments/`. Shared BP implementation lives in `bp_core/`, and all regression tests live in `tests/`.
 
 For the current team workflow, focus on `collect_ppg.py` for recording, `analyze_trials.py` for signal/HR review, `evaluate_bp_feasibility_models.py` for offline BP feasibility evaluation, and `view_live_bp_dashboard.py` for the display-only live preview. The viewers do not collect or save study data.
+
+## Which tools do I need?
+
+| Use | Commands or modules | Status |
+| --- | --- | --- |
+| Everyday recording and review | `collect_ppg.py`, `analyze_trials.py` | Primary team commands |
+| Everyday demonstration | `view_live_bp_dashboard.py` | Primary display, no recording |
+| Offline BP development | `bp_pipeline.py`, `evaluate_bp_feasibility.py`, `evaluate_bp_feasibility_models.py` | Supported analysis commands |
+| Optional fallback displays | `view_live_bp.py`, `view_live_bp_desktop.py`, `view_live_upper_arm_hr.py`, `view_live_hr.py` | Keep existing commands available |
+| Motion-classifier development | `prepare_motion_quality.py`, `train_motion_quality.py`, `evaluate_motion_quality.py` | Use only for a motion-quality study |
+| Historical reproducibility | `experiments/` | Not part of routine collection or live inference |
+| Shared code | `bp_core/`, `line_transport.py`, `live_bp_presentation.py`, `upper_arm_hr.py`, `motion_*.py` | Runtime dependencies, not disposable utilities |
+
+For feasibility evaluation, run `evaluate_bp_feasibility.py` first to produce the
+occasion feature table consumed by `evaluate_bp_feasibility_models.py`. The
+evaluation-only command does not save a deployment model. See
+[the documentation index](../docs/README.md) and
+[branch workflow](../docs/development_workflow.md).
 
 ## Acquisition and trial analysis
 
@@ -50,6 +68,9 @@ For the current team workflow, focus on `collect_ppg.py` for recording, `analyze
 ## Archived experiments
 
 These five completed experiments remain runnable for reproducing earlier findings; invoke them from the project root using their `tools/experiments/` paths.
+
+See the [experiment guide](experiments/README.md) for the boundary between archived
+research and active runtime code. Keep archived tests in the full regression suite.
 
 | Tool | Purpose |
 | --- | --- |

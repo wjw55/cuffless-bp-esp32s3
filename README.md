@@ -13,6 +13,28 @@ spacing from the nominal 100 Hz setting.
 
 The PC utilities are grouped by workflow in the [tool catalogue](tools/README.md). User-facing collection, analysis and viewer command paths remain unchanged; regression tests are contained in `tools/tests/`.
 
+## Everyday workflow
+
+Start with these commands rather than the historical experiments:
+
+| Task | Entry point |
+| --- | --- |
+| Record PPG/IMU and reference labels | `tools/collect_ppg.py` |
+| Review recorded signal quality and HR | `tools/analyze_trials.py` |
+| Extract strict versus feasibility occasion features | `tools/evaluate_bp_feasibility.py` |
+| Evaluate participant-held-out feasibility models | `tools/evaluate_bp_feasibility_models.py` |
+| Show the display-only local dashboard | `tools/view_live_bp_dashboard.py` |
+
+Use `tools/bp_pipeline.py` for the main offline BP training and prediction workflow.
+The viewers do not save study recordings. Only one viewer or collector may own a
+device at a time. Existing USB/BLE commands and data formats are unchanged.
+
+See the [documentation index](docs/README.md) for current guides and archived
+evidence, and the [development workflow](docs/development_workflow.md) for branch
+usage. Open `ppg_logger.code-workspace` in VS Code to hide generated build/cache
+folders without deleting them. Recordings and model directories remain visible
+locally and ignored by Git.
+
 ## Wiring
 
 | MAX30102 breakout | ESP32-S3 |

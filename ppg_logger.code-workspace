@@ -1,0 +1,19 @@
+{
+  "folders": [
+    {
+      "name": "PPG Logger",
+      "path": "."
+    }
+  ],
+  "settings": {
+    "files.exclude": {
+      "**/build": true,
+      "**/build_*": true,
+      "**/managed_components": true,
+      "**/releases": true,
+      "**/__pycache__": true,
+      "**/.pytest_cache": true,
+      "**/.ruff_cache": true
+    }
+  }
+}
