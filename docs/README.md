@@ -23,6 +23,7 @@ These guides describe separate experiments, not additional live requirements:
 - [Public Graphene PPG/Finapres experiment](graphene_ppg_bp.md)
 - [PPG/IMU motion-feasibility investigation](motion_feasibility.md)
 - [Motion-aware BP research pipeline](motion_bp_pipeline.md)
+- [Offline pulse-detector comparison](pulse_detector_comparison.md)
 - [Archived experiment commands](../tools/experiments/README.md)
 
 ## Historical evidence

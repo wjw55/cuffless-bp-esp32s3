@@ -7,7 +7,7 @@ instead of forcing a heart-rate estimate and never changes the raw input data.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Callable
 
 import numpy as np
 import pandas as pd
@@ -400,7 +400,15 @@ def _winning_cluster(bpms: list[float]) -> tuple[list[float], int]:
     return best, runner_up
 
 
-def analyze_upper_arm_ppg(df: pd.DataFrame, metadata: dict[str, Any]) -> UpperArmResult:
+def analyze_upper_arm_ppg(
+    df: pd.DataFrame,
+    metadata: dict[str, Any],
+    *,
+    window_estimator: Callable[..., WindowResult] | None = None,
+) -> UpperArmResult:
+    # Offline experiments can replace only the window estimator. Existing callers
+    # retain the original detector and all masking, health and consensus rules.
+    estimator = estimate_window if window_estimator is None else window_estimator
     timestamps_ms = df["timestamp_ms"].to_numpy(dtype=float)
     ir = df["ir"].to_numpy(dtype=float)
     red = df["red"].to_numpy(dtype=float)
@@ -456,7 +464,7 @@ def analyze_upper_arm_ppg(df: pd.DataFrame, metadata: dict[str, Any]) -> UpperAr
                 reason = rejection or "filtered_segment_unavailable"
                 windows.append(WindowResult(start_s, end_s, reason, reason))
                 continue
-            window = estimate_window(
+            window = estimator(
                 time_s[indices],
                 processed_ir[indices],
                 red[indices],
