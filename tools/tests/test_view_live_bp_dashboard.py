@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import shutil
+import subprocess
 import sys
 import threading
 import time
@@ -66,6 +68,33 @@ def snapshot(**changes) -> PresentationSnapshot:
         waveform_ir=(-3.0, 3.0),
     )
     return replace(base, **changes)
+
+
+@unittest.skipUnless(shutil.which("node"), "Node.js is required for the dashboard canvas regression tests")
+class DashboardCanvasTests(unittest.TestCase):
+    def run_canvas_case(self, case: str) -> None:
+        result = subprocess.run(
+            [shutil.which("node"), str(Path(__file__).with_name("test_dashboard_canvas.cjs")), case],
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_repeated_high_dpi_updates_keep_canvas_sizes_bounded(self):
+        self.run_canvas_case("repeated")
+
+    def test_width_and_pixel_ratio_changes_preserve_display_height(self):
+        self.run_canvas_case("resize")
+
+    def test_oversized_backing_buffer_does_not_become_display_height(self):
+        self.run_canvas_case("oversized")
+
+    def test_missing_or_invalid_pixel_ratio_uses_safe_default(self):
+        self.run_canvas_case("ratio")
+
+    def test_chart_markup_declares_independent_display_heights(self):
+        self.run_canvas_case("markup")
 
 
 class DashboardDiscoveryTests(unittest.TestCase):

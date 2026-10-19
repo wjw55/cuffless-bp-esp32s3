@@ -103,10 +103,22 @@ function formatNumber(value, digits = 1, suffix = "") { return value == null ? "
 function addDefinition(list, name, value) { const dt = document.createElement("dt"); dt.textContent = name; const dd = document.createElement("dd"); dd.textContent = value ?? "--"; list.append(dt, dd); }
 
 function resizeCanvas(canvas) {
-  const ratio = window.devicePixelRatio || 1; const width = Math.max(200, canvas.clientWidth);
-  const height = Number(canvas.getAttribute("height")) || 220;
-  if (canvas.width !== width * ratio || canvas.height !== height * ratio) { canvas.width = width * ratio; canvas.height = height * ratio; }
-  const ctx = canvas.getContext("2d"); ctx.setTransform(ratio, 0, 0, ratio, 0, 0); return {ctx, width, height};
+  const deviceRatio = window.devicePixelRatio;
+  const ratio = Number.isFinite(deviceRatio) && deviceRatio > 0 ? deviceRatio : 1;
+  const width = Math.max(200, canvas.clientWidth);
+  // Canvas height reflects the scaled backing buffer, not the CSS display size.
+  // Keep the logical height independent so repeated high-DPI updates cannot grow it.
+  const configuredHeight = Number(canvas.dataset.chartHeight);
+  const height = Number.isFinite(configuredHeight) && configuredHeight > 0 ? configuredHeight : 220;
+  const pixelWidth = Math.round(width * ratio);
+  const pixelHeight = Math.round(height * ratio);
+  const displayHeight = `${height}px`;
+  if (canvas.style.height !== displayHeight) canvas.style.height = displayHeight;
+  if (canvas.width !== pixelWidth) canvas.width = pixelWidth;
+  if (canvas.height !== pixelHeight) canvas.height = pixelHeight;
+  const ctx = canvas.getContext("2d");
+  ctx.setTransform(ratio, 0, 0, ratio, 0, 0);
+  return {ctx, width, height};
 }
 
 function chartFrame(ctx, width, height, minY, maxY) {

@@ -93,13 +93,13 @@
 
       <article class="panel chart-card waveform-card">
         <div class="card-header"><span>LIVE PPG</span><span>Last 15 seconds · baseline removed</span></div>
-        <canvas id="waveform" height="220" aria-label="Live PPG waveform"></canvas>
+        <canvas id="waveform" height="220" data-chart-height="220" aria-label="Live PPG waveform"></canvas>
         <p id="waveform-empty" class="chart-empty">Waiting for PPG samples</p>
       </article>
 
       <article class="panel chart-card history-card">
         <div class="card-header"><span>SESSION BP HISTORY</span><button id="reset-history" class="text-button" type="button">Clear</button></div>
-        <canvas id="history" height="250" aria-label="Accepted blood pressure history"></canvas>
+        <canvas id="history" height="250" data-chart-height="250" aria-label="Accepted blood pressure history"></canvas>
         <p id="history-empty" class="chart-empty">New accepted estimates will appear as points. Held values are not repeated.</p>
         <div class="legend"><span><i class="sbp"></i>SBP</span><span><i class="dbp"></i>DBP</span></div>
         <ol id="history-points" class="history-points"></ol>
