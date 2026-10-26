@@ -87,6 +87,25 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     predict.add_argument("--metadata-json", required=True)
     predict.add_argument("--allow-unvalidated", action="store_true")
     predict.add_argument("--output", help="Optional JSON result path")
+
+    combined = subparsers.add_parser("combined-subject", help="Setup-aware Ridge-only development; never enables live BP")
+    combined.add_argument("--config", default="config/bp_pipeline_v1.json")
+    combined.add_argument("--policy-config", default="config/bp_feasibility_v1.json")
+    combined.add_argument("--study-config", required=True, help="Explicit setup calibrations, development and future test IDs")
+    combined.add_argument("--output-dir", required=True, help="New, non-existing research run directory")
+    combined.add_argument("--prepare-only", action="store_true")
+
+    combined_predict = subparsers.add_parser("combined-predict", help="Offline-only unvalidated prediction with a combined research package")
+    combined_predict.add_argument("--run-dir", required=True)
+    combined_predict.add_argument("--ppg-csv", required=True)
+    combined_predict.add_argument("--imu-csv", required=True)
+    combined_predict.add_argument("--metadata-json", required=True)
+    combined_predict.add_argument("--setup-id", required=True)
+    combined_predict.add_argument("--allow-unvalidated", action="store_true")
+    combined_predict.add_argument("--output")
+
+    combined_evaluate = subparsers.add_parser("combined-evaluate", help="Evaluate the frozen combined model once on explicitly reserved future occasions")
+    combined_evaluate.add_argument("--run-dir", required=True)
     return parser.parse_args(argv)
 
 
@@ -600,6 +619,24 @@ def main(argv: list[str] | None = None) -> int:
             return command_single_subject(args)
         if args.command == "predict":
             return command_predict(args)
+        if args.command == "combined-subject":
+            from bp_core.combined import train_combined
+            result = train_combined(args.config, args.policy_config, args.study_config, args.output_dir, args.prepare_only)
+            print(json.dumps({key: value for key, value in result.items() if key not in {"raw_sources", "software"}}, indent=2))
+            print(f"Saved research run: {Path(args.output_dir).resolve()}")
+            return 0 if result["status"] in {"prepared_only", "development_model_fitted"} else 2
+        if args.command == "combined-predict":
+            from bp_core.combined import predict_combined
+            result = predict_combined(args.run_dir, args.ppg_csv, args.imu_csv, args.metadata_json, args.setup_id,
+                                      allow_unvalidated=bool(args.allow_unvalidated))
+            if args.output:
+                write_json(resolve_path(args.output), result)
+            print(json.dumps(result, indent=2))
+            return 0 if result.get("sbp") is not None else 1
+        if args.command == "combined-evaluate":
+            from bp_core.combined import evaluate_combined
+            print(json.dumps(evaluate_combined(args.run_dir), indent=2))
+            return 0
     except (FileNotFoundError, FileExistsError, ValueError, json.JSONDecodeError) as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         return 2

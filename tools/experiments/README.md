@@ -21,3 +21,11 @@ implementation files plus the package marker. Their regression tests remain in
 
 See [the active tool catalogue](../README.md) for routine commands. Do not move
 active shared code into this directory just because it originated in research.
+
+## Active offline investigation
+
+`compare_pulse_detectors.py` is a separate, offline-only comparison of the existing
+upper-arm pulse detector and an autocorrelation-guided candidate. It is not a
+sixth completed experiment or a replacement live algorithm. See the
+[comparison guide](../../docs/pulse_detector_comparison.md). Generated comparisons
+remain local; no BP model is fitted or changed.

@@ -65,6 +65,12 @@ evaluation-only command does not save a deployment model. See
 
 `bp_pipeline.py` remains the main upper-arm stationary path. The active feasibility evaluators do not change the live BP algorithm.
 
+For explicit legacy/new-housing personal development, use `bp_pipeline.py
+combined-subject`. Its separate `combined-predict` and `combined-evaluate` modes
+use frozen setup calibrations and feasibility processing. Packages remain
+offline-only and cannot be loaded by live viewers. See the
+[combined-data guide](../docs/bp_combined_housing.md).
+
 ## Archived experiments
 
 These five completed experiments remain runnable for reproducing earlier findings; invoke them from the project root using their `tools/experiments/` paths.

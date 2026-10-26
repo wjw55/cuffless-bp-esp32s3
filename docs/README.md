@@ -7,6 +7,7 @@
 - [Data collection and labelling protocol](data_collection_protocol.md)
 - [USB/BLE transport and validation procedure](ble_transport.md)
 - [Offline BP pipeline, model packages and prediction](bp_pipeline.md)
+- [Setup-aware legacy/new-housing Ridge development](bp_combined_housing.md)
 - [Strict and gap-tolerant feasibility policies](bp_recovery_comparison.md#separate-gap-tolerant-feasibility-policy)
 - [PPG clock tracking: implementation, bench evidence and limitations](ppg_timestamp_tracking.md)
 - [Branches, testing and local-file hygiene](development_workflow.md)
@@ -23,6 +24,7 @@ These guides describe separate experiments, not additional live requirements:
 - [Public Graphene PPG/Finapres experiment](graphene_ppg_bp.md)
 - [PPG/IMU motion-feasibility investigation](motion_feasibility.md)
 - [Motion-aware BP research pipeline](motion_bp_pipeline.md)
+- [Offline pulse-detector comparison](pulse_detector_comparison.md)
 - [Archived experiment commands](../tools/experiments/README.md)
 
 ## Historical evidence

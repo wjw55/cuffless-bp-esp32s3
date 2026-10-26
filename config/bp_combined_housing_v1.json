@@ -1,0 +1,61 @@
+{
+  "schema_version": 1,
+  "participant_id": "P001",
+  "target_episode_id": "housing_v1",
+  "training_variant": "combined",
+  "minimum_development_occasions": 5,
+  "minimum_test_occasions": 5,
+  "episodes": [
+    {
+      "episode_id": "legacy_mount",
+      "setup_id": "legacy_mount",
+      "description": "Explicit legacy session cohort, not a claim that every historical mount was identical. Previously examined test results are development only.",
+      "sensor_location": "left_outer_upper_arm_5cm_above_elbow",
+      "calibration_occasion_id": "local_upper_arm:P001:personal_bp_development_001:occasion_002_repeat_001",
+      "development_occasion_ids": [
+        "local_upper_arm:P001:personal_bp_development_001:occasion_003",
+        "local_upper_arm:P001:personal_bp_development_001:occasion_004",
+        "local_upper_arm:P001:personal_bp_development_001:occasion_005",
+        "local_upper_arm:P001:personal_bp_development_001:occasion_006",
+        "local_upper_arm:P001:personal_bp_development_001:occasion_007",
+        "local_upper_arm:P001:personal_bp_development_001:occasion_008",
+        "local_upper_arm:P001:personal_bp_development_001:occasion_009",
+        "local_upper_arm:P001:personal_bp_development_001:occasion_010",
+        "local_upper_arm:P001:personal_bp_development_001:occasion_011",
+        "local_upper_arm:P001:personal_bp_development_001:occasion_012",
+        "local_upper_arm:P001:personal_bp_development_001:occasion_013",
+        "local_upper_arm:P001:personal_bp_development_001:occasion_014",
+        "local_upper_arm:P001:personal_bp_development_001:occasion_015",
+        "local_upper_arm:P001:personal_bp_validation_002:validation_001",
+        "local_upper_arm:P001:personal_bp_validation_002:validation_002",
+        "local_upper_arm:P001:personal_bp_validation_002:validation_003",
+        "local_upper_arm:P001:personal_bp_validation_002:validation_004",
+        "local_upper_arm:P001:personal_bp_validation_002:validation_005",
+        "local_upper_arm:P001:personal_bp_validation_002:validation_006",
+        "local_upper_arm:P001:personal_bp_validation_002:validation_007",
+        "local_upper_arm:P001:personal_bp_validation_002:validation_008"
+      ],
+      "test_occasion_ids": []
+    },
+    {
+      "episode_id": "housing_v1",
+      "setup_id": "housing_v1",
+      "description": "New-housing stationary pilot; all five are development/calibration, not independent validation.",
+      "sensor_location": "left_outer_upper_arm_5cm_above_elbow",
+      "calibration_occasion_id": "local_upper_arm:P001:housing_v1_development_20261020:stationary_001",
+      "development_occasion_ids": [
+        "local_upper_arm:P001:housing_v1_development_20261020:stationary_002",
+        "local_upper_arm:P001:housing_v1_development_20261020:stationary_003",
+        "local_upper_arm:P001:housing_v1_development_20261020:stationary_004",
+        "local_upper_arm:P001:housing_v1_development_20261020:stationary_005"
+      ],
+      "test_occasion_ids": [
+        "local_upper_arm:P001:housing_v1_prospective_test_001:validation_001",
+        "local_upper_arm:P001:housing_v1_prospective_test_001:validation_002",
+        "local_upper_arm:P001:housing_v1_prospective_test_001:validation_003",
+        "local_upper_arm:P001:housing_v1_prospective_test_001:validation_004",
+        "local_upper_arm:P001:housing_v1_prospective_test_001:validation_005"
+      ]
+    }
+  ]
+}

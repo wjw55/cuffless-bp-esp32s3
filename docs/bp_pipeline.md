@@ -175,6 +175,16 @@ Adding `--motion-quality-shadow-model ...` to the same command also saves `*_mot
 
 ## Interpretation
 
+### Separate combined legacy/new-housing development
+
+`bp_pipeline.py combined-subject` adds explicit setup-calibration episodes and
+Ridge-only personal development with the frozen feasibility policy. Separate
+`combined-predict` and `combined-evaluate` commands preserve identical offline
+processing and reserved future test IDs. These research packages cannot be
+loaded by existing live viewers. See the [combined-data guide](bp_combined_housing.md)
+for study configuration and commands. Existing `run`, `single-subject`, `predict`
+and multi-participant evaluation remain unchanged.
+
 The primary comparison is against `zero_change`, which always predicts the participant's calibration BP. A morphology model is scientifically useful only if it reduces held-out-participant MAE for both SBP and DBP. Wrist/fingertip results do not validate upper-arm performance, and generated models must not be presented as medical devices.
 
 The single-subject command is a retrospective feasibility check, not evidence that the method generalizes to another person. Do not choose a different model after viewing locked-test errors; doing so turns those test occasions into development data and requires a new future test set.
