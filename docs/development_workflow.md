@@ -33,6 +33,14 @@ regression suite before committing:
 git diff --check
 ```
 
+Keep Python source files in LF format, as enforced by `.gitattributes` even on
+Windows. Frozen BP research packages fingerprint exact processing-source bytes;
+changing line endings can otherwise invalidate a package after switching branches.
+Do not normalize participant files or edit a frozen package's hashes to work
+around an integrity failure. Regression coverage exercises Git checkouts with
+`core.autocrlf=true`, `false` and `input`, and verifies real code edits still change
+the processing fingerprints.
+
 Inspect the exact staged files and commit only software, tests and documentation.
 Keep participant information and generated models/results out of Git. Review the
 branch and perform relevant hardware tests before merging it into `main`. A Python

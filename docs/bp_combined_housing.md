@@ -76,6 +76,15 @@ model, participant/schema and processing-code integrity. Code changes fail
 closed rather than silently changing inference. Only load trusted local Joblib
 packages; checksums are not a defence against malicious pickle contents.
 
+Python sources use LF line endings through the repository's `.gitattributes`,
+including Windows checkouts with `core.autocrlf=true`. Processing fingerprints
+remain exact byte hashes: the loader does not ignore code changes or rewrite
+saved manifests. An editor that saves processing sources as CRLF can therefore
+cause a compatibility failure even when the visible code is unchanged. Restore
+LF only after confirming that the normalized source matches the frozen hash;
+do not refresh manifest hashes to hide a mismatch. Raw signals, labels, model
+weights and frozen data/configuration files are never newline-normalized.
+
 ## Offline prediction
 
 Both raw PPG and IMU are required. Training and prediction call the same

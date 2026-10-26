@@ -1,0 +1,3 @@
+# Frozen model packages fingerprint Python source bytes. Keep Git checkouts
+# identical across platforms, including Windows with core.autocrlf=true.
+*.py text eol=lf
