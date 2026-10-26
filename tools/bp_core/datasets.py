@@ -160,7 +160,9 @@ def _discover_one_month(dataset: dict[str, Any]) -> list[Recording]:
     return recordings
 
 
-def _load_label_rows(labels_dir: Path) -> dict[tuple[str, str, str], dict[str, str]]:
+def _load_label_rows(
+    labels_dir: Path, *, selected_identities: set[tuple[str, str, str]] | None = None,
+) -> dict[tuple[str, str, str], dict[str, str]]:
     labels: dict[tuple[str, str, str], dict[str, str]] = {}
     for path in sorted(labels_dir.glob("*_labels.csv")) if labels_dir.exists() else []:
         with path.open(newline="", encoding="utf-8-sig") as handle:
@@ -170,6 +172,8 @@ def _load_label_rows(labels_dir: Path) -> dict[tuple[str, str, str], dict[str, s
                     str(row.get("session", "")).strip(),
                     str(row.get("trial_id", "")).strip(),
                 )
+                if selected_identities is not None and key not in selected_identities:
+                    continue
                 if not all(key):
                     raise ValueError(f"{path}:{line_number}: incomplete label identity")
                 if key in labels:
@@ -206,18 +210,27 @@ def _merge_local_value(metadata: dict[str, Any], label: dict[str, str] | None, m
     return metadata_value
 
 
-def _discover_local(dataset: dict[str, Any]) -> list[Recording]:
+def _discover_local(
+    dataset: dict[str, Any], *, selected_identities: set[tuple[str, str, str]] | None = None,
+) -> list[Recording]:
     raw_dir = resolve_path(dataset["raw_dir"])
-    labels = _load_label_rows(resolve_path(dataset["labels_dir"]))
+    labels = _load_label_rows(resolve_path(dataset["labels_dir"]), selected_identities=selected_identities)
     required_profile = str(dataset.get("required_profile", ""))
     recordings: list[Recording] = []
-    for metadata_path in sorted(raw_dir.glob("*_metadata.json")) if raw_dir.exists() else []:
+    paths = sorted(raw_dir.glob("*_metadata.json")) if raw_dir.exists() else []
+    if selected_identities is not None:
+        paths = [raw_dir / f"{participant}_{session}_{trial}_metadata.json"
+                 for participant, session, trial in sorted(selected_identities)]
+        paths = [path for path in paths if path.exists()]
+    for metadata_path in paths:
         metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
         if required_profile and metadata.get("ppg_profile") != required_profile:
             continue
         participant = str(metadata.get("subject_id", "")).strip()
         session = str(metadata.get("session_id", "")).strip()
         trial = str(metadata.get("trial_id", "")).strip()
+        if selected_identities is not None and (participant, session, trial) not in selected_identities:
+            raise ValueError(f"Selected filename has mismatched metadata identity: {metadata_path}")
         if not all((participant, session, trial)):
             continue
         label = labels.get((participant, session, trial))
