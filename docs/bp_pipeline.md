@@ -30,6 +30,92 @@ Clean coverage is the union of accepted time intervals within each recording. Fo
 
 `occasion_features.csv` contains `occasion_usable`, `occasion_status`, `unique_clean_coverage_s`, and `occasion_rejection_reasons`. `rejected_occasions.csv` provides a convenient rejected-only view; `segment_features.csv` retains the window-level reasons.
 
+## Pre-recording signal readiness
+
+The collector's optional pre-check assesses signal readiness without loading a BP
+model, reading cuff/reference labels or consulting the shadow classifier. Install
+`numpy pandas scipy matplotlib pyserial joblib` in the collector's Python environment;
+BLE additionally needs `pip install -r requirements-ble.txt`.
+
+For example, from `ppg_logger`, using a new session/trial name:
+
+```powershell
+python tools\collect_ppg.py `
+  --port COM9 `
+  --duration 90 `
+  --subject P001 `
+  --session readiness_collection_001 `
+  --trial-id stationary_001 `
+  --posture seated `
+  --sensor-location left_outer_upper_arm_5cm_above_elbow `
+  --ppg-profile upper_arm_experimental `
+  --imu-location left_upper_arm_adjacent_to_ppg `
+  --imu-orientation unmeasured `
+  --precheck-bp-quality `
+  --precheck-timeout 120 `
+  --prompt-labels `
+  --omron-timing after_ppg
+```
+
+Replace `--port COM9` with `--transport ble --ble-device PPG-LOGGER-XXXXXX` for
+BLE. Only one collector/viewer/dashboard may own the wearable at a time. The
+pre-check is off by default, requires the upper-arm profile, and cannot be
+combined with `--motion-protocol`. Existing finger/serial/BLE commands are
+unchanged when it is off.
+
+`tools/bp_precheck.py` loads `config/bp_pipeline_v1.json` and the separate
+`config/bp_feasibility_v1.json`. It calls the existing feasibility extraction with
+unchanged filtering, contact, clipping and pulse-quality thresholds: eight-second
+windows, four-second steps, at least three accepted windows and at least 24 seconds
+of unique clean coverage. Overlapping windows count their union, not their summed
+length. This readiness policy is separate from the strict 60-second BP-core gate;
+passing it cannot guarantee that the subsequent recording passes that gate.
+
+Both streams must supply 30 seconds of continuous, stationary signal aligned by
+absolute ESP timestamps within their common coverage. Motion status must be no
+older than three seconds, stream receipt no older than five seconds, and both
+sensor-health reports no older than ten seconds (two firmware five-second reporting
+periods, allowing delivery jitter). Missing health counters are not assumed zero.
+Any reported nonzero PPG/IMU I2C or FIFO-overflow count, including cumulative counts
+from before connection, aborts the attempt. Restart the device after resolving the
+fault; the pre-check never subtracts a counter baseline.
+
+Movement, sequence discontinuities, non-increasing timestamps, or gaps exceeding
+the existing policy's 40 ms threshold clear both readiness buffers. Stale telemetry
+also invalidates readiness. The overall timeout continues while new data accumulate.
+Poor contact or waveform quality produces adjustment advice while older samples
+leave the rolling buffer. A single background worker evaluates bounded copied
+snapshots approximately every five seconds; results from a previous reset generation
+or snapshots older than three seconds cannot start recording.
+
+After `READY — recording starts now`, the collector retains the connection and
+original firmware timestamps/sequence numbers, but starts fresh recording samples,
+live-analysis state and the full requested duration. Pre-check samples and HR
+history do not enter the trial. A timeout (default 120 seconds), sensor fault,
+disconnect or Ctrl+C before this transition writes no trial or label files, does
+not overwrite an existing trial even with `--overwrite`, and never prompts for a
+cuff measurement. After transition, existing incomplete-recording and cuff-label
+behaviour remains in effect.
+
+Completed recording metadata gains `precheck`: elapsed seconds, stationary buffer
+duration, accepted/total windows, unique clean coverage, reset count, configuration
+and policy paths/SHA256 identifiers. Raw PPG/IMU CSV columns remain unchanged.
+READY is neither BP validation nor permission to pool different housing/mounting
+configurations. Record the actual mounting in normal collection metadata.
+
+Local replay regression: recording 008 never passed the tested trailing 30-second
+slices; recording 009 first passed at approximately 35 seconds with five accepted
+windows and 28 unique clean seconds. Its first 30-second slice had only 16 unique
+clean seconds. Private recordings remain local; the regression test skips these
+fixtures on installations without them and verifies their bytes remain unchanged.
+
+Implementation review also exposed an existing limitation in the frozen BP core:
+`features._expand_mask` uses an 8-bit convolution accumulator, which can overflow
+on long artifact masks. The pre-check separately vetoes any Moving state and
+resets its whole buffer, so it does not rely on that mask to permit movement.
+Correcting the shared core requires a separate processing-version/model-compatibility
+review; this addition deliberately preserves its bytes and saved-model hashes.
+
 ## Commands
 
 From the `ppg_logger` directory:

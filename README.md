@@ -141,6 +141,34 @@ Collect over BLE by closing any other BLE client and running:
 
 Omit `--ble-device` only when exactly one `PPG-LOGGER-*` device is nearby. The collector stops and saves an incomplete attempt if BLE disconnects. The BP viewer reconnects, hides stale BP, and rebuilds its clean buffer from post-reconnection samples. Existing serial commands remain unchanged. See [BLE transport and validation](docs/ble_transport.md) for UUIDs, behavior, and the hardware test sequence.
 
+## Optional BP Signal Readiness Check
+
+Add `--precheck-bp-quality --precheck-timeout 120` to an ordinary upper-arm
+collector command (`--ppg-profile upper_arm_experimental`). Install the quality
+dependencies in the same Python environment first:
+
+```powershell
+python -m pip install numpy pandas scipy matplotlib pyserial joblib
+```
+
+The collector checks a rolling 30 seconds of stationary PPG/IMU using the existing
+feasibility policy: at least three accepted eight-second windows and 24 unique
+clean seconds. It prints adjustment advice while waiting. After
+`READY — recording starts now`, the full requested duration starts automatically
+on the same USB/BLE connection. Pre-check samples are excluded from the recording.
+Keep still after READY; a later artifact can still make the recording unusable.
+
+Timeout (120 seconds by default), a sensor fault, disconnection or Ctrl+C before
+READY saves no trial files or labels and requests no cuff reading. Once recording
+starts, the normal incomplete-attempt saving and cuff-label workflow applies.
+Scheduled `--motion-protocol` collection cannot use this option. Without the flag,
+existing commands, including finger collection, behave as before. Close viewers,
+dashboards and other collectors before opening the device.
+
+READY means signal readiness, not BP validation or compatibility between mounting
+configurations. It does not change model gates, the dashboard, or the strict BP
+training policy. See [pre-check details and provenance](docs/bp_pipeline.md#pre-recording-signal-readiness).
+
 ## Live Heart Rate
 
 The firmware prints a live heart-rate status approximately once per second without changing either raw stream. It waits eight seconds after detecting a finger, causally removes the IR baseline, smooths the signal, detects plausible peaks between 40 and 180 BPM, and reports the median of up to seven recent beat intervals.

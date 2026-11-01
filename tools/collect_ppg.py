@@ -167,6 +167,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--duration", required=True, type=positive_float, help="Recording duration in seconds")
     parser.add_argument("--required-stream-timeout", type=positive_float, default=None,
                         help="Stop and save an interrupted attempt if either PPG or IMU is absent for this many seconds; off by default")
+    parser.add_argument("--precheck-bp-quality", action="store_true",
+                        help="Check 30 s of stationary upper-arm signal before automatically starting the full recording")
+    parser.add_argument("--precheck-timeout", type=positive_float, default=120.0,
+                        help="Maximum pre-check wait in seconds, default 120; used with --precheck-bp-quality")
     parser.add_argument("--subject", required=True, help="Subject ID, for example S01")
     parser.add_argument("--session", required=True, help="Session name, for example test_001")
     parser.add_argument("--trial-id", default="", help="Trial ID, for example T01")
@@ -288,6 +292,18 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 def validate_collection_args(args: argparse.Namespace, parser: argparse.ArgumentParser | None = None) -> argparse.Namespace:
     validate_transport_arguments(args, parser)
+    if getattr(args, "precheck_bp_quality", False):
+        message = None
+        if not math.isfinite(getattr(args, "precheck_timeout", 120.0)):
+            message = "--precheck-timeout must be positive and finite"
+        elif args.ppg_profile != "upper_arm_experimental":
+            message = "--precheck-bp-quality requires --ppg-profile upper_arm_experimental"
+        elif getattr(args, "motion_protocol", None):
+            message = "--precheck-bp-quality cannot be combined with --motion-protocol"
+        if message:
+            if parser is not None:
+                parser.error(message)
+            raise SystemExit(f"ERROR: {message}")
     cuff_time_fields = {
         "cuff_start_time_s": "--cuff-start-time-s",
         "cuff_reading_time_s": "--cuff-reading-time-s",
@@ -1541,6 +1557,16 @@ def build_metadata(
 def main() -> int:
     args = parse_args()
 
+    precheck_module = None
+    precheck_outcome = None
+    if getattr(args, "precheck_bp_quality", False):
+        try:
+            import bp_precheck as precheck_module
+            precheck_settings = precheck_module.load_settings()
+        except (ImportError, ValueError, OSError) as exc:
+            print(f"ERROR: BP pre-check requires NumPy, pandas, SciPy, joblib and valid BP quality configuration.\nDetails: {exc}", file=sys.stderr)
+            return 2
+
     if args.plot_start is not None and args.plot_end is not None and args.plot_end <= args.plot_start:
         print("ERROR: --plot-end must be greater than --plot-start", file=sys.stderr)
         return 1
@@ -1670,6 +1696,16 @@ def main() -> int:
                     print(f"Starting in {remaining}...", flush=True)
                     time.sleep(1.0)
                 ser.reset_input_buffer()
+
+            if precheck_module is not None:
+                try:
+                    precheck_outcome = precheck_module.run_precheck(
+                        ser, precheck_settings, args.precheck_timeout,
+                    )
+                except precheck_module.PrecheckError as exc:
+                    print(f"ERROR: {exc}\nNo trial files or labels were saved.", file=sys.stderr)
+                    return 1
+                firmware_diagnostics = precheck_outcome.diagnostics
 
             recording_start = datetime.now().astimezone()
             recording_start_monotonic = time.monotonic()
@@ -1830,10 +1866,16 @@ def main() -> int:
                     next_live_update = now + live_bp_viewer.DEFAULT_REFRESH_SECONDS
 
     except KeyboardInterrupt:
+        if precheck_module is not None and "recording_start_monotonic" not in locals():
+            print("\nPre-check cancelled. No trial files or labels were saved.")
+            return 130
         interrupted = True
         recording_start = locals().get("recording_start", datetime.now().astimezone())
         print("\nCtrl+C received. Saving collected samples...")
     except LineTransportDisconnected as exc:
+        if precheck_module is not None and "recording_start_monotonic" not in locals():
+            print(f"ERROR: {exc}. No trial files or labels were saved.", file=sys.stderr)
+            return 1
         interrupted = True
         recording_start = locals().get("recording_start", datetime.now().astimezone())
         print(f"\nERROR: {exc}. Stopping early and saving this incomplete attempt.", file=sys.stderr)
@@ -1909,6 +1951,8 @@ def main() -> int:
         live_hr_csv_path if live_viewer is not None else None,
         live_hr_records,
     )
+    if precheck_outcome is not None:
+        metadata["precheck"] = precheck_outcome.metadata
     if live_bp_viewer is not None and live_bp_context is not None:
         metadata.update(
             {
